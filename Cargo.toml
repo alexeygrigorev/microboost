@@ -1,0 +1,12 @@
+[package]
+name = "microboost"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = "0.31"
+egui = "0.31"
+cpal = "0.16"
+hound = "3.5"
+chrono = "0.4"
+rodio = { version = "0.20", default-features = false, features = ["wav"] }
