@@ -14,7 +14,7 @@ A simple Windows microphone booster app with a native UI.
 
 ## Screenshots
 
-_TODO: Add screenshot_
+<img width="407" height="428" alt="image" src="https://github.com/user-attachments/assets/3e0e66fb-932b-4c47-939a-5fe433ec9ca7" />
 
 ## Installation
 
