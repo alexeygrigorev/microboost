@@ -10,3 +10,4 @@ cpal = "0.16"
 hound = "3.5"
 chrono = "0.4"
 rodio = { version = "0.20", default-features = false, features = ["wav"] }
+windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com"] }

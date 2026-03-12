@@ -1,20 +1,20 @@
 # Microboost
 
-A simple Windows microphone booster app with a native UI.
+A Windows microphone booster that amplifies your mic for other apps (Discord, Teams, etc.) using a real-time audio pipeline through VB-CABLE.
+
+## How it works
+
+Microboost captures audio from your real microphone, applies software gain (up to 10x), and routes the boosted audio to a virtual audio cable. Other apps then use the virtual cable as their microphone input, hearing the amplified audio.
+
+On first launch, the app will offer to download and install VB-CABLE (free) automatically.
 
 ## Features
 
-- **Microphone Selection** - Choose from all available input devices
-- **Boost Slider** - Amplify your mic from 0% to 1000%
-  - Sticky points at 20%, 50%, 100%, 150%, 200%, 300%, 500%, 1000%
-  - Or type any custom value
-- **Record Test** - Record a test clip to check your levels
-- **Playback** - Play back your recording instantly
-- **Native UI** - Built with egui, no web technologies
-
-## Screenshots
-
-<img width="407" height="428" alt="image" src="https://github.com/user-attachments/assets/3e0e66fb-932b-4c47-939a-5fe433ec9ca7" />
+- Real-time microphone boost from 1x to 10x (100% to 1000%)
+- Automatic VB-CABLE setup on first run
+- Preset buttons for common boost levels (1x, 2x, 3x, 5x, 10x)
+- Test recording and playback to verify your levels
+- Native UI built with egui
 
 ## Installation
 
@@ -32,37 +32,35 @@ The executable will be at `target/release/microboost.exe`.
 
 ## Usage
 
-1. Select your microphone from the dropdown
-2. Adjust the boost slider (100% = no change, 200% = 2x louder, etc.)
-3. Click "Record Test" to record a sample
-4. Click "Play" to hear how you sound
-5. Click "Folder" to open the recordings folder
+1. Launch Microboost. If VB-CABLE is not installed, click "Install VB-CABLE" and accept the admin prompt.
+2. Select your microphone from the dropdown.
+3. Set the boost level (2x is a good starting point).
+4. Click "Start Boost".
+5. In your other app (Discord, Teams, etc.), select "CABLE Output" as the microphone input.
+
+Use "Record Test" and "Play" to verify the boost sounds right before going live.
 
 Recordings are saved to `%APPDATA%\Microboost\`.
 
+## Requirements
+
+- Windows 10 or later
+- VB-CABLE (installed automatically on first launch, or get it from https://vb-audio.com/Cable/)
+
 ## Development
-
-### Requirements
-
-- Rust (1.70+)
-- Cargo
 
 ### Build
 
 ```bash
-make build
-```
-
-### Run
-
-```bash
-make open
+cargo build --release
 ```
 
 ### Other commands
 
 ```bash
+make build    # Build release
 make run      # Build and run
+make open     # Open the built executable
 make kill     # Kill running instance
 make clean    # Clean build artifacts
 make folder   # Open recordings folder
@@ -71,9 +69,9 @@ make folder   # Open recordings folder
 ## Tech Stack
 
 - [egui](https://github.com/emilk/egui) - Native GUI
-- [cpal](https://github.com/RustAudio/cpal) - Audio capture
-- [hound](https://github.com/ruuda/hound) - WAV encoding
-- [rodio](https://github.com/RustAudio/rodio) - Audio playback
+- [cpal](https://github.com/RustAudio/cpal) - Audio capture and playback
+- [hound](https://github.com/ruuda/hound) - WAV encoding/decoding
+- [VB-CABLE](https://vb-audio.com/Cable/) - Virtual audio cable driver
 
 ## License
 

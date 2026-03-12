@@ -2003,6 +2003,7 @@ dependencies = [
  "egui",
  "hound",
  "rodio",
+ "windows 0.58.0",
 ]
 
 [[package]]
