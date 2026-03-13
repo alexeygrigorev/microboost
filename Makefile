@@ -1,22 +1,26 @@
-.PHONY: build run kill clean folder open
+CARGO = /c/Users/Alexey/.cargo/bin/cargo.exe
+TARGET = x86_64-pc-windows-msvc
+RELEASE_BIN = target/$(TARGET)/release/microboost.exe
+
+.PHONY: build run kill clean folder open rebuild
 
 build:
-	@export PATH="/c/Users/alexe/.cargo/bin:$$PATH" && cargo build --release
+	@$(CARGO) build --release --target $(TARGET)
 
 run: build
-	@./target/release/microboost.exe &
+	@./$(RELEASE_BIN) &
 
 kill:
 	@taskkill /f /im microboost.exe 2>/dev/null || true
 
 clean:
-	@cargo clean
+	@$(CARGO) clean
 
 folder:
 	@explorer "%APPDATA%\Microboost"
 
 open:
-	@cmd /c start target\\release\\microboost.exe
+	@cmd /c start $(subst /,\\,$(RELEASE_BIN))
 
 rebuild: kill build
 	@echo "Done. Run: make open"

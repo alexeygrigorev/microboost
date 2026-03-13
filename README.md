@@ -11,8 +11,9 @@ On first launch, the app will offer to download and install VB-CABLE (free) auto
 ## Features
 
 - Real-time microphone boost from 1x to 10x (100% to 1000%)
+- **Auto-calibration**: detects your voice level and sets the boost to YouTube-recommended loudness (~-16 dBFS)
 - Automatic VB-CABLE setup on first run
-- Preset buttons for common boost levels (1x, 2x, 3x, 5x, 10x)
+- Slider (up to 3x) with manual entry for higher values
 - Test recording and playback to verify your levels
 - Native UI built with egui
 
@@ -25,17 +26,19 @@ Or build from source:
 ```bash
 git clone https://github.com/alexeygrigorev/microboost.git
 cd microboost
-cargo build --release
+make build
 ```
 
-The executable will be at `target/release/microboost.exe`.
+The executable will be at `target/x86_64-pc-windows-msvc/release/microboost.exe`.
+
+> **Note:** The build requires the MSVC target (`x86_64-pc-windows-msvc`). The Makefile handles this automatically.
 
 ## Usage
 
 1. Launch Microboost. If VB-CABLE is not installed, click "Install VB-CABLE" and accept the admin prompt.
 2. Select your microphone from the dropdown.
-3. Set the boost level (2x is a good starting point).
-4. Click "Start Boost".
+3. Click "Auto-Calibrate" to detect your voice level, or manually set the boost.
+4. Click "Start Boost" (or "Accept & Start" after calibration).
 5. In your other app (Discord, Teams, etc.), select "CABLE Output" as the microphone input.
 
 Use "Record Test" and "Play" to verify the boost sounds right before going live.
@@ -52,18 +55,13 @@ Recordings are saved to `%APPDATA%\Microboost\`.
 ### Build
 
 ```bash
-cargo build --release
-```
-
-### Other commands
-
-```bash
-make build    # Build release
-make run      # Build and run
-make open     # Open the built executable
-make kill     # Kill running instance
-make clean    # Clean build artifacts
-make folder   # Open recordings folder
+make build      # Build release (MSVC target)
+make run        # Build and run
+make open       # Open the built executable
+make kill       # Kill running instance
+make clean      # Clean build artifacts
+make folder     # Open recordings folder
+make rebuild    # Kill, rebuild, then run: make open
 ```
 
 ## Tech Stack

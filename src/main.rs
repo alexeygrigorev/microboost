@@ -2,8 +2,46 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+
+/// Device profiles — saved per microphone name
+mod profiles {
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    fn profiles_path() -> PathBuf {
+        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(base).join("Microboost").join("profiles.json")
+    }
+
+    #[derive(Serialize, Deserialize, Clone, Debug)]
+    pub struct Profile {
+        pub boost: u32,
+    }
+
+    /// Map from device name -> Profile
+    pub type ProfileMap = HashMap<String, Profile>;
+
+    pub fn load() -> ProfileMap {
+        let path = profiles_path();
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            HashMap::new()
+        }
+    }
+
+    pub fn save(map: &ProfileMap) {
+        let path = profiles_path();
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        if let Ok(json) = serde_json::to_string_pretty(map) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+}
 
 /// VB-CABLE auto-setup
 mod vbcable {
@@ -150,7 +188,7 @@ mod vbcable {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([380.0, 440.0])
+            .with_inner_size([400.0, 580.0])
             .with_resizable(false)
             .with_title("Microboost"),
         ..Default::default()
@@ -170,6 +208,27 @@ enum SetupState {
     Failed(String),
     Ready,
 }
+
+#[derive(PartialEq, Clone)]
+enum CalibrationPhase {
+    Idle,
+    Listening,
+    Done {
+        boost_pct: u32,
+        raw_db: f32,      // Your voice level in dBFS
+        boosted_db: f32,   // After boost, in dBFS
+        target_db: f32,    // YouTube target in dBFS
+    },
+}
+
+const CALIBRATION_PHRASES: &[&str] = &[
+    "Hello, testing one two three. This is my normal speaking voice.",
+    "The quick brown fox jumps over the lazy dog near the river bank.",
+    "I'm recording a video and want my audio to sound clear and loud.",
+];
+
+/// YouTube recommended voice target: ~-16 dBFS RMS (0.16 linear)
+const TARGET_RMS: f32 = 0.16;
 
 struct MicroboostApp {
     host: cpal::Host,
@@ -202,6 +261,18 @@ struct MicroboostApp {
     rec_stream: Arc<Mutex<Option<cpal::Stream>>>,
     rec_active: Arc<Mutex<bool>>,
     rec_samples: Arc<Mutex<Vec<f32>>>,
+
+    // Auto-calibration
+    cal_phase: CalibrationPhase,
+    cal_start: Option<std::time::Instant>,
+    cal_stream: Arc<Mutex<Option<cpal::Stream>>>,
+    cal_active: Arc<Mutex<bool>>,
+    cal_samples: Arc<Mutex<Vec<f32>>>,
+    cal_rms_live: Arc<Mutex<f32>>,
+    cal_phrase_idx: usize,
+
+    // Profiles
+    device_profiles: HashMap<String, profiles::Profile>,
 }
 
 const RING_SIZE: usize = 48000 * 2;
@@ -214,13 +285,21 @@ impl MicroboostApp {
         let cable_installed = vbcable::is_installed();
         let selected_output = Self::find_cable_output(&output_devices).unwrap_or(0);
 
+        let device_profiles = profiles::load();
+        // Load saved boost for the first input device
+        let boost = input_devices
+            .first()
+            .and_then(|name| device_profiles.get(name))
+            .map(|p| p.boost)
+            .unwrap_or(200);
+
         Self {
             host,
             input_devices,
             output_devices,
             selected_input: 0,
             selected_output,
-            boost: 200,
+            boost,
             is_active: false,
             status: Arc::new(Mutex::new("Ready".to_string())),
             setup_state: if cable_installed {
@@ -242,6 +321,16 @@ impl MicroboostApp {
             rec_stream: Arc::new(Mutex::new(None)),
             rec_active: Arc::new(Mutex::new(false)),
             rec_samples: Arc::new(Mutex::new(Vec::new())),
+
+            cal_phase: CalibrationPhase::Idle,
+            cal_start: None,
+            cal_stream: Arc::new(Mutex::new(None)),
+            cal_active: Arc::new(Mutex::new(false)),
+            cal_samples: Arc::new(Mutex::new(Vec::new())),
+            cal_rms_live: Arc::new(Mutex::new(0.0)),
+            cal_phrase_idx: 0,
+
+            device_profiles,
         }
     }
 
@@ -314,6 +403,7 @@ impl MicroboostApp {
     }
 
     fn start_pipeline(&mut self) {
+        self.save_current_profile();
         let input_device = self
             .host
             .input_devices()
@@ -481,11 +571,159 @@ impl MicroboostApp {
         *self.status.lock().unwrap() = "Stopped".to_string();
     }
 
+    fn save_current_profile(&mut self) {
+        if let Some(name) = self.input_devices.get(self.selected_input) {
+            self.device_profiles.insert(
+                name.clone(),
+                profiles::Profile { boost: self.boost },
+            );
+            profiles::save(&self.device_profiles);
+        }
+    }
+
+    fn load_profile_for_device(&mut self) {
+        if let Some(name) = self.input_devices.get(self.selected_input) {
+            if let Some(profile) = self.device_profiles.get(name) {
+                self.boost = profile.boost;
+            }
+        }
+    }
+
     fn update_gain(&mut self) {
         if self.is_active {
             self.stop_pipeline();
             self.start_pipeline();
         }
+    }
+
+    fn start_calibration(&mut self) {
+        // Stop boost pipeline if running — we need raw mic levels
+        if self.is_active {
+            self.stop_pipeline();
+        }
+
+        *self.cal_samples.lock().unwrap() = Vec::new();
+        *self.cal_active.lock().unwrap() = true;
+        *self.cal_rms_live.lock().unwrap() = 0.0;
+        self.cal_phase = CalibrationPhase::Listening;
+        self.cal_start = Some(std::time::Instant::now());
+        // Pick a random phrase
+        self.cal_phrase_idx =
+            (std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_millis() as usize)
+                % CALIBRATION_PHRASES.len();
+
+        let device = self
+            .host
+            .input_devices()
+            .ok()
+            .and_then(|mut devs| devs.nth(self.selected_input))
+            .or_else(|| self.host.default_input_device());
+
+        if let Some(device) = device {
+            if let Ok(supported_config) = device.default_input_config() {
+                let config: cpal::StreamConfig = supported_config.clone().into();
+                let input_channels = supported_config.channels() as usize;
+                let samples = self.cal_samples.clone();
+                let active = self.cal_active.clone();
+                let rms_live = self.cal_rms_live.clone();
+                let sample_rate = supported_config.sample_rate().0 as usize;
+
+                if let Ok(stream) = device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        if !*active.lock().unwrap() {
+                            return;
+                        }
+                        let mut s = samples.lock().unwrap();
+                        for chunk in data.chunks(input_channels) {
+                            let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                            s.push(mono); // Raw, no boost
+                        }
+                        // Update live RMS over last ~0.3s
+                        let window = sample_rate / 3;
+                        if s.len() > window {
+                            let recent = &s[s.len() - window..];
+                            let sum_sq: f32 =
+                                recent.iter().map(|x| x * x).sum();
+                            let rms = (sum_sq / recent.len() as f32).sqrt();
+                            *rms_live.lock().unwrap() = rms;
+                        }
+                    },
+                    |e| eprintln!("Calibration error: {}", e),
+                    None,
+                ) {
+                    if stream.play().is_ok() {
+                        *self.cal_stream.lock().unwrap() = Some(stream);
+                    }
+                }
+            }
+        }
+        *self.status.lock().unwrap() = "Calibrating — speak now...".to_string();
+    }
+
+    fn finish_calibration(&mut self) {
+        *self.cal_active.lock().unwrap() = false;
+        *self.cal_stream.lock().unwrap() = None;
+
+        let raw_rms = {
+            let samples = self.cal_samples.lock().unwrap();
+            if samples.len() < 4800 {
+                self.cal_phase = CalibrationPhase::Idle;
+                *self.status.lock().unwrap() = "Calibration failed — not enough audio".to_string();
+                return;
+            }
+
+            // Compute RMS of entire capture, ignoring silence (gate at -50 dBFS)
+            let silence_gate = 0.003_f32; // ~-50 dBFS
+            let voiced: Vec<f32> = samples
+                .iter()
+                .copied()
+                .filter(|s| s.abs() > silence_gate)
+                .collect();
+
+            if voiced.len() < 2400 {
+                self.cal_phase = CalibrationPhase::Idle;
+                *self.status.lock().unwrap() =
+                    "Calibration failed — couldn't detect speech. Try speaking louder.".to_string();
+                return;
+            }
+
+            let sum_sq: f32 = voiced.iter().map(|x| x * x).sum();
+            (sum_sq / voiced.len() as f32).sqrt()
+        };
+
+        // Calculate needed boost
+        let needed = TARGET_RMS / raw_rms;
+        let boost_pct = (needed * 100.0).round() as u32;
+        let boost_pct = boost_pct.clamp(100, 300);
+
+        let raw_db = 20.0 * raw_rms.log10();
+        let boosted_rms = (raw_rms * boost_pct as f32 / 100.0).min(1.0);
+        let boosted_db = 20.0 * boosted_rms.log10();
+        let target_db = 20.0 * TARGET_RMS.log10();
+
+        self.boost = boost_pct;
+        self.cal_phase = CalibrationPhase::Done {
+            boost_pct,
+            raw_db,
+            boosted_db,
+            target_db,
+        };
+        self.save_current_profile();
+        *self.status.lock().unwrap() = format!(
+            "Voice: {:.1} dB -> Boosted: {:.1} dB (target: {:.1} dB)",
+            raw_db, boosted_db, target_db
+        );
+    }
+
+    fn cancel_calibration(&mut self) {
+        *self.cal_active.lock().unwrap() = false;
+        *self.cal_stream.lock().unwrap() = None;
+        self.cal_phase = CalibrationPhase::Idle;
+        *self.status.lock().unwrap() = "Calibration cancelled".to_string();
     }
 
     fn start_recording(&mut self) {
@@ -727,8 +965,18 @@ impl eframe::App for MicroboostApp {
         // Poll setup thread
         self.check_setup_thread();
 
+        // Auto-finish calibration after 5 seconds
+        if self.cal_phase == CalibrationPhase::Listening {
+            if let Some(start) = self.cal_start {
+                if start.elapsed().as_secs() >= 5 {
+                    self.finish_calibration();
+                }
+            }
+        }
+
         if self.is_recording
             || self.is_active
+            || self.cal_phase == CalibrationPhase::Listening
             || matches!(self.setup_state, SetupState::Downloading)
         {
             ctx.request_repaint();
@@ -824,7 +1072,18 @@ impl MicroboostApp {
         ui.add_space(4.0);
 
         // Input device
-        ui.label("Microphone");
+        ui.horizontal(|ui| {
+            ui.label("Microphone");
+            if let Some(name) = self.input_devices.get(self.selected_input) {
+                if self.device_profiles.contains_key(name) {
+                    ui.label(
+                        egui::RichText::new("(saved profile)")
+                            .small()
+                            .color(egui::Color32::from_rgb(120, 180, 120)),
+                    );
+                }
+            }
+        });
         let prev_input = self.selected_input;
         egui::ComboBox::from_id_salt("input_device")
             .width(340.0)
@@ -840,36 +1099,64 @@ impl MicroboostApp {
                 }
             });
 
-        if self.is_active && prev_input != self.selected_input {
-            self.stop_pipeline();
-            self.start_pipeline();
+        if prev_input != self.selected_input {
+            // Save boost for old device, load for new one
+            if let Some(old_name) = self.input_devices.get(prev_input) {
+                self.device_profiles.insert(
+                    old_name.clone(),
+                    profiles::Profile { boost: self.boost },
+                );
+            }
+            self.load_profile_for_device();
+            profiles::save(&self.device_profiles);
+
+            if self.is_active {
+                self.stop_pipeline();
+                self.start_pipeline();
+            }
         }
 
         ui.add_space(8.0);
 
-        // Boost slider
-        let boost_steps = [100, 200, 300, 500, 1000];
+        // Boost slider (capped at 300%, manual entry for higher)
+        let boost_presets = [100, 150, 200, 300];
+        let prev_boost = self.boost;
         ui.horizontal(|ui| {
-            ui.label(format!(
-                "Boost: {}% ({:.1}x)",
-                self.boost,
-                self.boost as f32 / 100.0
-            ));
+            ui.label("Boost:");
+            let drag = ui.add(
+                egui::DragValue::new(&mut self.boost)
+                    .range(100..=1000)
+                    .speed(10)
+                    .suffix("%"),
+            );
+            ui.label(format!("({:.1}x)", self.boost as f32 / 100.0));
+            if drag.changed() {
+                // Round to nearest 10
+                self.boost = ((self.boost + 5) / 10) * 10;
+                self.boost = self.boost.clamp(100, 1000);
+            }
+            if drag.lost_focus() && self.is_active && self.boost != prev_boost {
+                self.update_gain();
+            }
         });
 
         ui.add_space(4.0);
 
+        // Slider caps at 300%
+        let slider_val = self.boost.min(300);
+        let mut slider_boost = slider_val;
         ui.push_id("boost_slider", |ui| {
             ui.spacing_mut().slider_width = 340.0;
             let resp = ui.add(
-                egui::Slider::new(&mut self.boost, 100..=1000)
+                egui::Slider::new(&mut slider_boost, 100..=300)
                     .show_value(false)
                     .step_by(10.0)
                     .trailing_fill(true),
             );
             if resp.changed() {
-                for &step in &boost_steps {
-                    if (self.boost as i32 - step as i32).abs() < 20 {
+                self.boost = slider_boost;
+                for &step in &boost_presets {
+                    if (self.boost as i32 - step as i32).abs() < 15 {
                         self.boost = step;
                         break;
                     }
@@ -883,8 +1170,8 @@ impl MicroboostApp {
         ui.add_space(4.0);
 
         ui.horizontal(|ui| {
-            for &preset in &boost_steps {
-                let label = format!("{:.0}x", preset as f32 / 100.0);
+            for &preset in &boost_presets {
+                let label = format!("{:.1}x", preset as f32 / 100.0);
                 if ui
                     .selectable_label(self.boost == preset, &label)
                     .clicked()
@@ -897,7 +1184,188 @@ impl MicroboostApp {
             }
         });
 
-        ui.add_space(8.0);
+        ui.add_space(4.0);
+
+        // Auto-calibration section
+        match &self.cal_phase {
+            CalibrationPhase::Idle => {
+                let cal_btn = ui.add_sized(
+                    [340.0, 28.0],
+                    egui::Button::new(
+                        egui::RichText::new("Auto-Calibrate (detect my voice level)")
+                            .color(egui::Color32::WHITE),
+                    )
+                    .fill(egui::Color32::from_rgb(100, 80, 180)),
+                );
+                if cal_btn.clicked() {
+                    self.start_calibration();
+                }
+            }
+            CalibrationPhase::Listening => {
+                let elapsed = self
+                    .cal_start
+                    .map(|s| s.elapsed().as_secs_f32())
+                    .unwrap_or(0.0);
+                let remaining = (5.0 - elapsed).max(0.0);
+
+                ui.group(|ui| {
+                    ui.set_width(340.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(255, 200, 60),
+                        "Speak now at your normal volume:",
+                    );
+                    ui.add_space(2.0);
+                    ui.label(
+                        egui::RichText::new(
+                            CALIBRATION_PHRASES[self.cal_phrase_idx],
+                        )
+                        .italics(),
+                    );
+                    ui.add_space(4.0);
+
+                    // Live level meter
+                    let live_rms = *self.cal_rms_live.lock().unwrap();
+                    let db = if live_rms > 0.0001 {
+                        20.0 * live_rms.log10()
+                    } else {
+                        -80.0
+                    };
+                    // Map -60dB..0dB to 0..1
+                    let level = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(340.0, 12.0),
+                        egui::Sense::hover(),
+                    );
+                    let painter = ui.painter();
+                    painter.rect_filled(
+                        rect,
+                        3.0,
+                        egui::Color32::from_rgb(40, 40, 40),
+                    );
+                    let bar_color = if level > 0.85 {
+                        egui::Color32::from_rgb(220, 60, 60)
+                    } else if level > 0.6 {
+                        egui::Color32::from_rgb(60, 200, 60)
+                    } else {
+                        egui::Color32::from_rgb(60, 140, 200)
+                    };
+                    let bar_rect = egui::Rect::from_min_size(
+                        rect.min,
+                        egui::vec2(rect.width() * level, rect.height()),
+                    );
+                    painter.rect_filled(bar_rect, 3.0, bar_color);
+
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{:.1}s remaining", remaining));
+                        if ui.small_button("Cancel").clicked() {
+                            self.cancel_calibration();
+                        }
+                    });
+                });
+            }
+            CalibrationPhase::Done { boost_pct, raw_db, boosted_db, target_db } => {
+                let boost_val = *boost_pct;
+                let raw_db = *raw_db;
+                let boosted_db = *boosted_db;
+                let target_db = *target_db;
+                ui.group(|ui| {
+                    ui.set_width(340.0);
+                    ui.colored_label(
+                        egui::Color32::from_rgb(100, 200, 100),
+                        format!(
+                            "Recommended boost: {:.1}x ({}%)",
+                            boost_val as f32 / 100.0,
+                            boost_val
+                        ),
+                    );
+
+                    // Visual level comparison
+                    ui.add_space(4.0);
+                    let bar_width = 300.0;
+                    // Map dBFS: -60..0 -> 0..1
+                    let raw_frac = ((raw_db + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let boosted_frac = ((boosted_db + 60.0) / 60.0).clamp(0.0, 1.0);
+                    let target_frac = ((target_db + 60.0) / 60.0).clamp(0.0, 1.0);
+
+                    // Your voice level
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Your mic ").small());
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(bar_width, 10.0), egui::Sense::hover(),
+                        );
+                        let p = ui.painter();
+                        p.rect_filled(rect, 2.0, egui::Color32::from_rgb(40, 40, 40));
+                        p.rect_filled(
+                            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * raw_frac, 10.0)),
+                            2.0, egui::Color32::from_rgb(80, 130, 200),
+                        );
+                        // Target marker line
+                        let tx = rect.min.x + rect.width() * target_frac;
+                        p.line_segment(
+                            [egui::pos2(tx, rect.min.y), egui::pos2(tx, rect.max.y)],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 60)),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("           {:.1} dBFS", raw_db)).small()
+                            .color(egui::Color32::from_rgb(80, 130, 200)));
+                    });
+
+                    // Boosted level
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Boosted  ").small());
+                        let (rect, _) = ui.allocate_exact_size(
+                            egui::vec2(bar_width, 10.0), egui::Sense::hover(),
+                        );
+                        let p = ui.painter();
+                        p.rect_filled(rect, 2.0, egui::Color32::from_rgb(40, 40, 40));
+                        p.rect_filled(
+                            egui::Rect::from_min_size(rect.min, egui::vec2(rect.width() * boosted_frac, 10.0)),
+                            2.0, egui::Color32::from_rgb(60, 200, 60),
+                        );
+                        let tx = rect.min.x + rect.width() * target_frac;
+                        p.line_segment(
+                            [egui::pos2(tx, rect.min.y), egui::pos2(tx, rect.max.y)],
+                            egui::Stroke::new(2.0, egui::Color32::from_rgb(255, 200, 60)),
+                        );
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("           {:.1} dBFS", boosted_db)).small()
+                            .color(egui::Color32::from_rgb(60, 200, 60)));
+                        ui.label(egui::RichText::new(format!("  | target: {:.1} dBFS", target_db)).small()
+                            .color(egui::Color32::from_rgb(255, 200, 60)));
+                    });
+
+                    if boost_val >= 300 {
+                        ui.label(
+                            egui::RichText::new(
+                                "Capped at 3x. Use the slider above for higher values.",
+                            )
+                            .small()
+                            .color(egui::Color32::from_rgb(180, 180, 120)),
+                        );
+                    }
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Accept & Start").clicked() {
+                            self.save_current_profile();
+                            self.cal_phase = CalibrationPhase::Idle;
+                            self.start_pipeline();
+                        }
+                        if ui.button("Re-calibrate").clicked() {
+                            self.start_calibration();
+                        }
+                        if ui.button("Dismiss").clicked() {
+                            self.cal_phase = CalibrationPhase::Idle;
+                        }
+                    });
+                });
+            }
+        }
+
+        ui.add_space(4.0);
 
         // Start/Stop
         let btn_text = if self.is_active {
