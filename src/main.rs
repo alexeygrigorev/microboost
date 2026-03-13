@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+mod noise_gate;
+
 /// Device profiles — saved per microphone name
 mod profiles {
     use serde::{Deserialize, Serialize};
@@ -38,6 +40,33 @@ mod profiles {
         let path = profiles_path();
         let _ = std::fs::create_dir_all(path.parent().unwrap());
         if let Ok(json) = serde_json::to_string_pretty(map) {
+            let _ = std::fs::write(&path, json);
+        }
+    }
+
+    fn settings_path() -> PathBuf {
+        let base = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
+        PathBuf::from(base).join("Microboost").join("settings.json")
+    }
+
+    #[derive(Serialize, Deserialize, Default)]
+    pub struct Settings {
+        pub last_input_device: Option<String>,
+    }
+
+    pub fn load_settings() -> Settings {
+        let path = settings_path();
+        if let Ok(data) = std::fs::read_to_string(&path) {
+            serde_json::from_str(&data).unwrap_or_default()
+        } else {
+            Settings::default()
+        }
+    }
+
+    pub fn save_settings(settings: &Settings) {
+        let path = settings_path();
+        let _ = std::fs::create_dir_all(path.parent().unwrap());
+        if let Ok(json) = serde_json::to_string_pretty(settings) {
             let _ = std::fs::write(&path, json);
         }
     }
@@ -188,7 +217,7 @@ mod vbcable {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 660.0])
+            .with_inner_size([420.0, 740.0])
             .with_resizable(false)
             .with_title("Microboost"),
         ..Default::default()
@@ -255,6 +284,8 @@ struct MicroboostApp {
     live_gain: Arc<Mutex<f32>>,       // Shared gain: updated without restarting pipeline
     live_input_rms: Arc<Mutex<f32>>,  // Raw input level for visualizer
     live_output_rms: Arc<Mutex<f32>>, // Boosted output level for visualizer
+    input_history: Vec<f32>,   // Rolling waveform history (RMS values)
+    output_history: Vec<f32>,
 
     // Test recording
     is_recording: bool,
@@ -276,6 +307,13 @@ struct MicroboostApp {
 
     // Profiles
     device_profiles: HashMap<String, profiles::Profile>,
+
+    // Noise gate
+    noise_gate: Arc<Mutex<noise_gate::NoiseGate>>,
+    ng_cal_state: Arc<Mutex<noise_gate::CalibrationState>>,
+    ng_calibrating: bool,
+    ng_cal_start: Option<std::time::Instant>,
+    ng_cal_stream: Arc<Mutex<Option<cpal::Stream>>>,
 }
 
 const RING_SIZE: usize = 48000 * 2;
@@ -289,9 +327,26 @@ impl MicroboostApp {
         let selected_output = Self::find_cable_output(&output_devices).unwrap_or(0);
 
         let device_profiles = profiles::load();
-        // Load saved boost for the first input device
+        let settings = profiles::load_settings();
+
+        // Select input device: 1) last used, 2) Windows default, 3) first
+        let selected_input = settings
+            .last_input_device
+            .as_ref()
+            .and_then(|saved| input_devices.iter().position(|d| d == saved))
+            .or_else(|| {
+                // Try to match Windows default input device
+                host.default_input_device()
+                    .and_then(|d| d.name().ok())
+                    .and_then(|default_name| {
+                        input_devices.iter().position(|d| d == &default_name)
+                    })
+            })
+            .unwrap_or(0);
+
+        // Load saved boost for the selected device
         let boost = input_devices
-            .first()
+            .get(selected_input)
             .and_then(|name| device_profiles.get(name))
             .map(|p| p.boost)
             .unwrap_or(200);
@@ -300,7 +355,7 @@ impl MicroboostApp {
             host,
             input_devices,
             output_devices,
-            selected_input: 0,
+            selected_input,
             selected_output,
             boost,
             is_active: false,
@@ -320,6 +375,8 @@ impl MicroboostApp {
             live_gain: Arc::new(Mutex::new(1.0)),
             live_input_rms: Arc::new(Mutex::new(0.0)),
             live_output_rms: Arc::new(Mutex::new(0.0)),
+            input_history: vec![0.0; 120],
+            output_history: vec![0.0; 120],
             is_recording: false,
             recording_start: None,
             last_recording: None,
@@ -337,6 +394,12 @@ impl MicroboostApp {
             cal_phrase_idx: 0,
 
             device_profiles,
+
+            noise_gate: Arc::new(Mutex::new(noise_gate::NoiseGate::new())),
+            ng_cal_state: noise_gate::new_calibration_state(),
+            ng_calibrating: false,
+            ng_cal_start: None,
+            ng_cal_stream: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -494,6 +557,7 @@ impl MicroboostApp {
         let gain_shared = self.live_gain.clone();
         let input_rms = self.live_input_rms.clone();
         let output_rms = self.live_output_rms.clone();
+        let ng = self.noise_gate.clone();
 
         // Set gain to current boost level
         *self.live_gain.lock().unwrap() = self.boost as f32 / 100.0;
@@ -506,6 +570,7 @@ impl MicroboostApp {
                     return;
                 }
                 let gain = *gain_shared.lock().unwrap();
+                let mut gate = ng.lock().unwrap();
                 let mut buf = ring_buf.lock().unwrap();
                 let mut w = ring_w.lock().unwrap();
                 let mut sum_raw = 0.0f32;
@@ -514,14 +579,15 @@ impl MicroboostApp {
                 for chunk in data.chunks(in_channels) {
                     let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
                     let boosted = (mono * gain).clamp(-1.0, 1.0);
-                    buf[*w % RING_SIZE] = boosted;
+                    // Apply noise gate after boost
+                    let gated = gate.process(boosted);
+                    buf[*w % RING_SIZE] = gated;
                     *w = (*w + 1) % (RING_SIZE * 2);
                     sum_raw += mono * mono;
-                    sum_out += boosted * boosted;
+                    sum_out += gated * gated;
                     count += 1;
                 }
                 if count > 0 {
-                    // Smooth with exponential moving average
                     let raw = (sum_raw / count as f32).sqrt();
                     let out = (sum_out / count as f32).sqrt();
                     let mut ir = input_rms.lock().unwrap();
@@ -631,6 +697,9 @@ impl MicroboostApp {
                 profiles::Profile { boost: self.boost },
             );
             profiles::save(&self.device_profiles);
+            profiles::save_settings(&profiles::Settings {
+                last_input_device: Some(name.clone()),
+            });
         }
     }
 
@@ -785,6 +854,101 @@ impl MicroboostApp {
         *self.cal_stream.lock().unwrap() = None;
         self.cal_phase = CalibrationPhase::Idle;
         *self.status.lock().unwrap() = "Calibration cancelled".to_string();
+    }
+
+    fn start_noise_calibration(&mut self) {
+        // Kill pipeline so we can capture raw mic
+        self.kill_pipeline();
+
+        {
+            let mut cal = self.ng_cal_state.lock().unwrap();
+            cal.active = true;
+            cal.samples.clear();
+        }
+        self.ng_calibrating = true;
+        self.ng_cal_start = Some(std::time::Instant::now());
+
+        let device = self
+            .host
+            .input_devices()
+            .ok()
+            .and_then(|mut devs| devs.nth(self.selected_input))
+            .or_else(|| self.host.default_input_device());
+
+        if let Some(device) = device {
+            if let Ok(supported_config) = device.default_input_config() {
+                let config: cpal::StreamConfig = supported_config.clone().into();
+                let input_channels = supported_config.channels() as usize;
+                let cal_state = self.ng_cal_state.clone();
+
+                if let Ok(stream) = device.build_input_stream(
+                    &config,
+                    move |data: &[f32], _| {
+                        let mut cal = cal_state.lock().unwrap();
+                        if !cal.active {
+                            return;
+                        }
+                        for chunk in data.chunks(input_channels) {
+                            let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                            cal.samples.push(mono);
+                        }
+                    },
+                    |e| eprintln!("Noise cal error: {}", e),
+                    None,
+                ) {
+                    if stream.play().is_ok() {
+                        *self.ng_cal_stream.lock().unwrap() = Some(stream);
+                    }
+                }
+            }
+        }
+        *self.status.lock().unwrap() = "Noise calibration — stay SILENT...".to_string();
+    }
+
+    fn finish_noise_calibration(&mut self) {
+        {
+            let mut cal = self.ng_cal_state.lock().unwrap();
+            cal.active = false;
+        }
+        *self.ng_cal_stream.lock().unwrap() = None;
+        self.ng_calibrating = false;
+        self.ng_cal_start = None;
+
+        let samples = {
+            let cal = self.ng_cal_state.lock().unwrap();
+            cal.samples.clone()
+        };
+
+        let mut gate = self.noise_gate.lock().unwrap();
+        match gate.finish_calibration(&samples) {
+            Ok(db) => {
+                *self.status.lock().unwrap() = format!(
+                    "Noise floor: {:.1} dBFS | Gate threshold: {:.1} dBFS | Gate ON",
+                    db,
+                    gate.threshold_db()
+                );
+            }
+            Err(e) => {
+                *self.status.lock().unwrap() = format!("Noise calibration failed: {}", e);
+            }
+        }
+        drop(gate);
+
+        // Restart pipeline with gate active
+        self.start_pipeline();
+    }
+
+    fn cancel_noise_calibration(&mut self) {
+        {
+            let mut cal = self.ng_cal_state.lock().unwrap();
+            cal.active = false;
+        }
+        *self.ng_cal_stream.lock().unwrap() = None;
+        self.ng_calibrating = false;
+        self.ng_cal_start = None;
+        *self.status.lock().unwrap() = "Noise calibration cancelled".to_string();
+        // Restart pipeline
+        self.start_pipeline();
     }
 
     fn start_recording(&mut self) {
@@ -1035,10 +1199,20 @@ impl eframe::App for MicroboostApp {
             }
         }
 
+        // Auto-finish noise calibration after 3 seconds
+        if self.ng_calibrating {
+            if let Some(start) = self.ng_cal_start {
+                if start.elapsed().as_secs() >= 3 {
+                    self.finish_noise_calibration();
+                }
+            }
+        }
+
         let pipeline_running = *self.pipeline_active.lock().unwrap();
         if self.is_recording
             || self.is_active
             || pipeline_running
+            || self.ng_calibrating
             || self.cal_phase == CalibrationPhase::Listening
             || matches!(self.setup_state, SetupState::Downloading)
         {
@@ -1186,7 +1360,7 @@ impl MicroboostApp {
         ui.add_space(8.0);
 
         // Boost slider (capped at 500%, manual entry for higher)
-        let boost_presets = [100, 150, 200, 300, 500];
+        let boost_presets = [100, 150, 200, 300, 400, 500];
         let prev_boost = self.boost;
         ui.horizontal(|ui| {
             ui.label("Boost:");
@@ -1434,6 +1608,56 @@ impl MicroboostApp {
 
         ui.add_space(4.0);
 
+        // Noise gate
+        if self.ng_calibrating {
+            let elapsed = self.ng_cal_start
+                .map(|s| s.elapsed().as_secs_f32())
+                .unwrap_or(0.0);
+            let remaining = (3.0 - elapsed).max(0.0);
+            ui.group(|ui| {
+                ui.set_width(340.0);
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 200, 60),
+                    "Stay SILENT — capturing background noise...",
+                );
+                ui.label(format!("{:.1}s remaining", remaining));
+                if ui.small_button("Cancel").clicked() {
+                    self.cancel_noise_calibration();
+                }
+            });
+        } else {
+            ui.horizontal(|ui| {
+                let gate = self.noise_gate.lock().unwrap();
+                let is_calibrated = gate.is_calibrated();
+                let is_enabled = gate.enabled;
+                let floor_db = gate.noise_floor_db();
+                drop(gate);
+
+                if is_calibrated {
+                    let mut gate = self.noise_gate.lock().unwrap();
+                    let mut enabled = gate.enabled;
+                    ui.checkbox(&mut enabled, "Noise Gate");
+                    gate.enabled = enabled;
+                    drop(gate);
+
+                    ui.label(
+                        egui::RichText::new(format!("floor: {:.0} dB", floor_db))
+                            .small()
+                            .color(if is_enabled {
+                                egui::Color32::from_rgb(100, 200, 100)
+                            } else {
+                                egui::Color32::GRAY
+                            }),
+                    );
+                }
+                if ui.small_button("Calibrate Noise").clicked() {
+                    self.start_noise_calibration();
+                }
+            });
+        }
+
+        ui.add_space(4.0);
+
         // Start/Stop
         let btn_text = if self.is_active {
             "Stop Boost"
@@ -1475,13 +1699,44 @@ impl MicroboostApp {
             );
         }
 
-        // Live audio level visualizer
+        // Live audio waveform visualizer — both waves overlaid
         if *self.pipeline_active.lock().unwrap() {
             ui.add_space(4.0);
             let in_rms = *self.live_input_rms.lock().unwrap();
             let out_rms = *self.live_output_rms.lock().unwrap();
 
-            let to_frac = |rms: f32| -> f32 {
+            // Push to rolling history
+            self.input_history.push(in_rms);
+            self.output_history.push(out_rms);
+            let max_points = 150;
+            if self.input_history.len() > max_points {
+                self.input_history.drain(0..self.input_history.len() - max_points);
+            }
+            if self.output_history.len() > max_points {
+                self.output_history.drain(0..self.output_history.len() - max_points);
+            }
+
+            let wave_w = 370.0;
+            let wave_h = 60.0;
+            let in_color = egui::Color32::from_rgb(60, 140, 220);
+            let out_color = egui::Color32::from_rgb(80, 220, 80);
+
+            // Legend
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("---").small().color(in_color));
+                ui.label(egui::RichText::new("Input").small());
+                ui.label(egui::RichText::new("---").small().color(out_color));
+                ui.label(egui::RichText::new("Output (boosted)").small());
+            });
+
+            let (rect, _) = ui.allocate_exact_size(
+                egui::vec2(wave_w, wave_h),
+                egui::Sense::hover(),
+            );
+            let p = ui.painter();
+            p.rect_filled(rect, 3.0, egui::Color32::from_rgb(20, 20, 25));
+
+            let rms_to_frac = |rms: f32| -> f32 {
                 if rms > 0.0001 {
                     ((20.0 * rms.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
                 } else {
@@ -1489,49 +1744,73 @@ impl MicroboostApp {
                 }
             };
 
-            let in_frac = to_frac(in_rms);
-            let out_frac = to_frac(out_rms);
-            let bar_w = 290.0;
-            let bar_h = 8.0;
+            let make_points = |history: &[f32]| -> Vec<egui::Pos2> {
+                let n = history.len();
+                if n < 2 {
+                    return vec![];
+                }
+                history
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &rms)| {
+                        let x = rect.min.x + (i as f32 / (n - 1) as f32) * rect.width();
+                        let frac = rms_to_frac(rms);
+                        let y = rect.max.y - frac * rect.height();
+                        egui::pos2(x, y)
+                    })
+                    .collect()
+            };
 
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Input  ").small());
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(bar_w, bar_h), egui::Sense::hover(),
+            // Draw filled area between input and output (shows the boost difference)
+            let in_pts = make_points(&self.input_history);
+            let out_pts = make_points(&self.output_history);
+
+            if in_pts.len() >= 2 && out_pts.len() >= 2 {
+                // Fill between the two curves to show boost amount
+                let n = in_pts.len().min(out_pts.len());
+                // Build polygon strips column by column to avoid convexity issues
+                for i in 0..n - 1 {
+                    let quad = vec![
+                        in_pts[i],
+                        in_pts[i + 1],
+                        out_pts[i + 1],
+                        out_pts[i],
+                    ];
+                    p.add(egui::Shape::convex_polygon(
+                        quad,
+                        egui::Color32::from_rgba_premultiplied(40, 180, 40, 25),
+                        egui::Stroke::NONE,
+                    ));
+                }
+
+                // Draw input line (thinner, behind)
+                p.add(egui::Shape::line(
+                    in_pts,
+                    egui::Stroke::new(1.5, in_color),
+                ));
+                // Draw output line (thicker, on top)
+                p.add(egui::Shape::line(
+                    out_pts,
+                    egui::Stroke::new(2.0, out_color),
+                ));
+            }
+
+            // dB scale markers
+            for &db in &[-40.0_f32, -20.0, -10.0] {
+                let frac = ((db + 60.0) / 60.0).clamp(0.0, 1.0);
+                let y = rect.max.y - frac * rect.height();
+                p.line_segment(
+                    [egui::pos2(rect.min.x, y), egui::pos2(rect.max.x, y)],
+                    egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 55)),
                 );
-                let p = ui.painter();
-                p.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
-                let fill = egui::Rect::from_min_size(
-                    rect.min, egui::vec2(rect.width() * in_frac, bar_h),
+                p.text(
+                    egui::pos2(rect.max.x - 22.0, y - 6.0),
+                    egui::Align2::LEFT_TOP,
+                    format!("{}dB", db as i32),
+                    egui::FontId::new(8.0, egui::FontFamily::Monospace),
+                    egui::Color32::from_rgb(80, 80, 90),
                 );
-                let color = if in_frac > 0.85 {
-                    egui::Color32::from_rgb(220, 60, 60)
-                } else if in_frac > 0.6 {
-                    egui::Color32::from_rgb(60, 200, 60)
-                } else {
-                    egui::Color32::from_rgb(60, 140, 200)
-                };
-                p.rect_filled(fill, 2.0, color);
-            });
-            ui.horizontal(|ui| {
-                ui.label(egui::RichText::new("Output ").small());
-                let (rect, _) = ui.allocate_exact_size(
-                    egui::vec2(bar_w, bar_h), egui::Sense::hover(),
-                );
-                let p = ui.painter();
-                p.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
-                let fill = egui::Rect::from_min_size(
-                    rect.min, egui::vec2(rect.width() * out_frac, bar_h),
-                );
-                let color = if out_frac > 0.85 {
-                    egui::Color32::from_rgb(220, 60, 60)
-                } else if out_frac > 0.6 {
-                    egui::Color32::from_rgb(60, 200, 60)
-                } else {
-                    egui::Color32::from_rgb(100, 200, 100)
-                };
-                p.rect_filled(fill, 2.0, color);
-            });
+            }
         }
 
         ui.add_space(8.0);
