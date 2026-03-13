@@ -22,6 +22,10 @@ mod profiles {
     #[derive(Serialize, Deserialize, Clone, Debug)]
     pub struct Profile {
         pub boost: u32,
+        #[serde(default)]
+        pub noise_floor_rms: Option<f32>,
+        #[serde(default)]
+        pub noise_gate_enabled: bool,
     }
 
     /// Map from device name -> Profile
@@ -308,6 +312,9 @@ struct MicroboostApp {
     // Profiles
     device_profiles: HashMap<String, profiles::Profile>,
 
+    // Auto-start
+    first_frame: bool,
+
     // Noise gate
     noise_gate: Arc<Mutex<noise_gate::NoiseGate>>,
     ng_cal_state: Arc<Mutex<noise_gate::CalibrationState>>,
@@ -345,11 +352,23 @@ impl MicroboostApp {
             .unwrap_or(0);
 
         // Load saved boost for the selected device
-        let boost = input_devices
+        let current_profile = input_devices
             .get(selected_input)
-            .and_then(|name| device_profiles.get(name))
-            .map(|p| p.boost)
-            .unwrap_or(200);
+            .and_then(|name| device_profiles.get(name));
+        let boost = current_profile.map(|p| p.boost).unwrap_or(200);
+
+        // Restore noise gate from profile
+        let noise_gate = noise_gate::NoiseGate::new();
+        let ng = {
+            let mut ng = noise_gate;
+            if let Some(profile) = current_profile {
+                if let Some(floor) = profile.noise_floor_rms {
+                    let headroom = ng.headroom;
+                    ng.restore(floor, profile.noise_gate_enabled, headroom);
+                }
+            }
+            ng
+        };
 
         Self {
             host,
@@ -395,7 +414,9 @@ impl MicroboostApp {
 
             device_profiles,
 
-            noise_gate: Arc::new(Mutex::new(noise_gate::NoiseGate::new())),
+            first_frame: true,
+
+            noise_gate: Arc::new(Mutex::new(ng)),
             ng_cal_state: noise_gate::new_calibration_state(),
             ng_calibrating: false,
             ng_cal_start: None,
@@ -692,9 +713,22 @@ impl MicroboostApp {
 
     fn save_current_profile(&mut self) {
         if let Some(name) = self.input_devices.get(self.selected_input) {
+            let gate = self.noise_gate.lock().unwrap();
+            let noise_floor_rms = if gate.is_calibrated() {
+                Some(gate.noise_floor_rms())
+            } else {
+                None
+            };
+            let noise_gate_enabled = gate.enabled;
+            drop(gate);
+
             self.device_profiles.insert(
                 name.clone(),
-                profiles::Profile { boost: self.boost },
+                profiles::Profile {
+                    boost: self.boost,
+                    noise_floor_rms,
+                    noise_gate_enabled,
+                },
             );
             profiles::save(&self.device_profiles);
             profiles::save_settings(&profiles::Settings {
@@ -707,6 +741,13 @@ impl MicroboostApp {
         if let Some(name) = self.input_devices.get(self.selected_input) {
             if let Some(profile) = self.device_profiles.get(name) {
                 self.boost = profile.boost;
+                let mut gate = self.noise_gate.lock().unwrap();
+                if let Some(floor) = profile.noise_floor_rms {
+                    let headroom = gate.headroom;
+                    gate.restore(floor, profile.noise_gate_enabled, headroom);
+                } else {
+                    gate.enabled = false;
+                }
             }
         }
     }
@@ -934,7 +975,8 @@ impl MicroboostApp {
         }
         drop(gate);
 
-        // Restart pipeline with gate active
+        // Save noise gate to profile and restart pipeline
+        self.save_current_profile();
         self.start_pipeline();
     }
 
@@ -1190,6 +1232,12 @@ impl eframe::App for MicroboostApp {
         // Poll setup thread
         self.check_setup_thread();
 
+        // Auto-start pipeline on first frame
+        if self.first_frame && self.setup_state == SetupState::Ready {
+            self.first_frame = false;
+            self.start_pipeline();
+        }
+
         // Auto-finish calibration after 5 seconds
         if self.cal_phase == CalibrationPhase::Listening {
             if let Some(start) = self.cal_start {
@@ -1339,9 +1387,21 @@ impl MicroboostApp {
         if prev_input != self.selected_input {
             // Save boost for old device, load for new one
             if let Some(old_name) = self.input_devices.get(prev_input) {
+                let gate = self.noise_gate.lock().unwrap();
+                let noise_floor_rms = if gate.is_calibrated() {
+                    Some(gate.noise_floor_rms())
+                } else {
+                    None
+                };
+                let noise_gate_enabled = gate.enabled;
+                drop(gate);
                 self.device_profiles.insert(
                     old_name.clone(),
-                    profiles::Profile { boost: self.boost },
+                    profiles::Profile {
+                        boost: self.boost,
+                        noise_floor_rms,
+                        noise_gate_enabled,
+                    },
                 );
             }
             self.load_profile_for_device();
@@ -1626,34 +1686,45 @@ impl MicroboostApp {
                 }
             });
         } else {
+            let mut ng_changed = false;
             ui.horizontal(|ui| {
-                let gate = self.noise_gate.lock().unwrap();
+                let mut gate = self.noise_gate.lock().unwrap();
                 let is_calibrated = gate.is_calibrated();
-                let is_enabled = gate.enabled;
                 let floor_db = gate.noise_floor_db();
+
+                let prev_enabled = gate.enabled;
+                let mut enabled = gate.enabled;
+                ui.checkbox(&mut enabled, "Noise Gate");
+                gate.enabled = enabled && is_calibrated;
+                if gate.enabled != prev_enabled {
+                    ng_changed = true;
+                }
                 drop(gate);
 
                 if is_calibrated {
-                    let mut gate = self.noise_gate.lock().unwrap();
-                    let mut enabled = gate.enabled;
-                    ui.checkbox(&mut enabled, "Noise Gate");
-                    gate.enabled = enabled;
-                    drop(gate);
-
                     ui.label(
                         egui::RichText::new(format!("floor: {:.0} dB", floor_db))
                             .small()
-                            .color(if is_enabled {
+                            .color(if enabled {
                                 egui::Color32::from_rgb(100, 200, 100)
                             } else {
                                 egui::Color32::GRAY
                             }),
                     );
+                } else {
+                    ui.label(
+                        egui::RichText::new("(not calibrated)")
+                            .small()
+                            .color(egui::Color32::GRAY),
+                    );
                 }
-                if ui.small_button("Calibrate Noise").clicked() {
+                if ui.small_button("Calibrate").clicked() {
                     self.start_noise_calibration();
                 }
             });
+            if ng_changed {
+                self.save_current_profile();
+            }
         }
 
         ui.add_space(4.0);

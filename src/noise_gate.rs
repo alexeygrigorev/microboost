@@ -43,6 +43,19 @@ impl NoiseGate {
         }
     }
 
+    /// Restore from saved noise floor value
+    pub fn restore(&mut self, noise_floor_rms: f32, enabled: bool, headroom: f32) {
+        self.noise_floor_rms = noise_floor_rms;
+        self.headroom = headroom;
+        self.threshold = noise_floor_rms * headroom;
+        self.enabled = enabled;
+    }
+
+    /// Get the raw noise floor RMS for saving
+    pub fn noise_floor_rms(&self) -> f32 {
+        self.noise_floor_rms
+    }
+
     /// Finish calibration: compute noise floor from collected samples
     pub fn finish_calibration(&mut self, samples: &[f32]) -> Result<f32, &'static str> {
         if samples.len() < 4800 {
