@@ -188,7 +188,7 @@ mod vbcable {
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([400.0, 580.0])
+            .with_inner_size([400.0, 660.0])
             .with_resizable(false)
             .with_title("Microboost"),
         ..Default::default()
@@ -252,6 +252,9 @@ struct MicroboostApp {
     ring_read: Arc<Mutex<usize>>,
     ring_write: Arc<Mutex<usize>>,
     pipeline_active: Arc<Mutex<bool>>,
+    live_gain: Arc<Mutex<f32>>,       // Shared gain: updated without restarting pipeline
+    live_input_rms: Arc<Mutex<f32>>,  // Raw input level for visualizer
+    live_output_rms: Arc<Mutex<f32>>, // Boosted output level for visualizer
 
     // Test recording
     is_recording: bool,
@@ -314,6 +317,9 @@ impl MicroboostApp {
             ring_read: Arc::new(Mutex::new(0)),
             ring_write: Arc::new(Mutex::new(0)),
             pipeline_active: Arc::new(Mutex::new(false)),
+            live_gain: Arc::new(Mutex::new(1.0)),
+            live_input_rms: Arc::new(Mutex::new(0.0)),
+            live_output_rms: Arc::new(Mutex::new(0.0)),
             is_recording: false,
             recording_start: None,
             last_recording: None,
@@ -404,6 +410,24 @@ impl MicroboostApp {
 
     fn start_pipeline(&mut self) {
         self.save_current_profile();
+
+        // If pipeline is already running, just update gain
+        if *self.pipeline_active.lock().unwrap() {
+            *self.live_gain.lock().unwrap() = self.boost as f32 / 100.0;
+            self.is_active = true;
+            let out_name = self
+                .output_devices
+                .get(self.selected_output)
+                .cloned()
+                .unwrap_or_default();
+            *self.status.lock().unwrap() = format!(
+                "Boosting {:.0}x -> {}",
+                self.boost as f32 / 100.0,
+                out_name
+            );
+            return;
+        }
+
         let input_device = self
             .host
             .input_devices()
@@ -467,7 +491,12 @@ impl MicroboostApp {
         let ring_buf = self.ring_buffer.clone();
         let ring_w = self.ring_write.clone();
         let active = self.pipeline_active.clone();
-        let gain = self.boost as f32 / 100.0;
+        let gain_shared = self.live_gain.clone();
+        let input_rms = self.live_input_rms.clone();
+        let output_rms = self.live_output_rms.clone();
+
+        // Set gain to current boost level
+        *self.live_gain.lock().unwrap() = self.boost as f32 / 100.0;
 
         let in_stream_config: cpal::StreamConfig = in_config.into();
         let input_stream = input_device.build_input_stream(
@@ -476,13 +505,29 @@ impl MicroboostApp {
                 if !*active.lock().unwrap() {
                     return;
                 }
+                let gain = *gain_shared.lock().unwrap();
                 let mut buf = ring_buf.lock().unwrap();
                 let mut w = ring_w.lock().unwrap();
+                let mut sum_raw = 0.0f32;
+                let mut sum_out = 0.0f32;
+                let mut count = 0usize;
                 for chunk in data.chunks(in_channels) {
                     let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
                     let boosted = (mono * gain).clamp(-1.0, 1.0);
                     buf[*w % RING_SIZE] = boosted;
                     *w = (*w + 1) % (RING_SIZE * 2);
+                    sum_raw += mono * mono;
+                    sum_out += boosted * boosted;
+                    count += 1;
+                }
+                if count > 0 {
+                    // Smooth with exponential moving average
+                    let raw = (sum_raw / count as f32).sqrt();
+                    let out = (sum_out / count as f32).sqrt();
+                    let mut ir = input_rms.lock().unwrap();
+                    let mut or = output_rms.lock().unwrap();
+                    *ir = *ir * 0.8 + raw * 0.2;
+                    *or = *or * 0.8 + out * 0.2;
                 }
             },
             |e| eprintln!("Input error: {}", e),
@@ -564,6 +609,14 @@ impl MicroboostApp {
     }
 
     fn stop_pipeline(&mut self) {
+        // Don't kill the streams — just set gain to 1x passthrough
+        *self.live_gain.lock().unwrap() = 1.0;
+        self.is_active = false;
+        *self.status.lock().unwrap() = "Passthrough (1x)".to_string();
+    }
+
+    fn kill_pipeline(&mut self) {
+        // Actually stop the audio streams (used on device switch)
         *self.pipeline_active.lock().unwrap() = false;
         *self.input_stream.lock().unwrap() = None;
         *self.output_stream.lock().unwrap() = None;
@@ -591,16 +644,24 @@ impl MicroboostApp {
 
     fn update_gain(&mut self) {
         if self.is_active {
-            self.stop_pipeline();
-            self.start_pipeline();
+            // Just update the shared gain — no need to restart pipeline
+            *self.live_gain.lock().unwrap() = self.boost as f32 / 100.0;
+            let out_name = self
+                .output_devices
+                .get(self.selected_output)
+                .cloned()
+                .unwrap_or_default();
+            *self.status.lock().unwrap() = format!(
+                "Boosting {:.0}x -> {}",
+                self.boost as f32 / 100.0,
+                out_name
+            );
         }
     }
 
     fn start_calibration(&mut self) {
-        // Stop boost pipeline if running — we need raw mic levels
-        if self.is_active {
-            self.stop_pipeline();
-        }
+        // Kill pipeline — we need raw mic levels for calibration
+        self.kill_pipeline();
 
         *self.cal_samples.lock().unwrap() = Vec::new();
         *self.cal_active.lock().unwrap() = true;
@@ -698,7 +759,7 @@ impl MicroboostApp {
         // Calculate needed boost
         let needed = TARGET_RMS / raw_rms;
         let boost_pct = (needed * 100.0).round() as u32;
-        let boost_pct = boost_pct.clamp(100, 300);
+        let boost_pct = boost_pct.clamp(100, 500);
 
         let raw_db = 20.0 * raw_rms.log10();
         let boosted_rms = (raw_rms * boost_pct as f32 / 100.0).min(1.0);
@@ -974,8 +1035,10 @@ impl eframe::App for MicroboostApp {
             }
         }
 
+        let pipeline_running = *self.pipeline_active.lock().unwrap();
         if self.is_recording
             || self.is_active
+            || pipeline_running
             || self.cal_phase == CalibrationPhase::Listening
             || matches!(self.setup_state, SetupState::Downloading)
         {
@@ -1110,16 +1173,20 @@ impl MicroboostApp {
             self.load_profile_for_device();
             profiles::save(&self.device_profiles);
 
-            if self.is_active {
+            // Restart pipeline with new device
+            let was_active = self.is_active;
+            self.kill_pipeline();
+            self.start_pipeline();
+            if !was_active {
+                // Was in passthrough mode — go back to passthrough
                 self.stop_pipeline();
-                self.start_pipeline();
             }
         }
 
         ui.add_space(8.0);
 
-        // Boost slider (capped at 300%, manual entry for higher)
-        let boost_presets = [100, 150, 200, 300];
+        // Boost slider (capped at 500%, manual entry for higher)
+        let boost_presets = [100, 150, 200, 300, 500];
         let prev_boost = self.boost;
         ui.horizontal(|ui| {
             ui.label("Boost:");
@@ -1142,13 +1209,13 @@ impl MicroboostApp {
 
         ui.add_space(4.0);
 
-        // Slider caps at 300%
-        let slider_val = self.boost.min(300);
+        // Slider caps at 500%
+        let slider_val = self.boost.min(500);
         let mut slider_boost = slider_val;
         ui.push_id("boost_slider", |ui| {
             ui.spacing_mut().slider_width = 340.0;
             let resp = ui.add(
-                egui::Slider::new(&mut slider_boost, 100..=300)
+                egui::Slider::new(&mut slider_boost, 100..=500)
                     .show_value(false)
                     .step_by(10.0)
                     .trailing_fill(true),
@@ -1338,10 +1405,10 @@ impl MicroboostApp {
                             .color(egui::Color32::from_rgb(255, 200, 60)));
                     });
 
-                    if boost_val >= 300 {
+                    if boost_val >= 500 {
                         ui.label(
                             egui::RichText::new(
-                                "Capped at 3x. Use the slider above for higher values.",
+                                "Capped at 5x. Use manual entry above for higher values.",
                             )
                             .small()
                             .color(egui::Color32::from_rgb(180, 180, 120)),
@@ -1408,8 +1475,140 @@ impl MicroboostApp {
             );
         }
 
+        // Live audio level visualizer
+        if *self.pipeline_active.lock().unwrap() {
+            ui.add_space(4.0);
+            let in_rms = *self.live_input_rms.lock().unwrap();
+            let out_rms = *self.live_output_rms.lock().unwrap();
+
+            let to_frac = |rms: f32| -> f32 {
+                if rms > 0.0001 {
+                    ((20.0 * rms.log10() + 60.0) / 60.0).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                }
+            };
+
+            let in_frac = to_frac(in_rms);
+            let out_frac = to_frac(out_rms);
+            let bar_w = 290.0;
+            let bar_h = 8.0;
+
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Input  ").small());
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(bar_w, bar_h), egui::Sense::hover(),
+                );
+                let p = ui.painter();
+                p.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
+                let fill = egui::Rect::from_min_size(
+                    rect.min, egui::vec2(rect.width() * in_frac, bar_h),
+                );
+                let color = if in_frac > 0.85 {
+                    egui::Color32::from_rgb(220, 60, 60)
+                } else if in_frac > 0.6 {
+                    egui::Color32::from_rgb(60, 200, 60)
+                } else {
+                    egui::Color32::from_rgb(60, 140, 200)
+                };
+                p.rect_filled(fill, 2.0, color);
+            });
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("Output ").small());
+                let (rect, _) = ui.allocate_exact_size(
+                    egui::vec2(bar_w, bar_h), egui::Sense::hover(),
+                );
+                let p = ui.painter();
+                p.rect_filled(rect, 2.0, egui::Color32::from_rgb(30, 30, 30));
+                let fill = egui::Rect::from_min_size(
+                    rect.min, egui::vec2(rect.width() * out_frac, bar_h),
+                );
+                let color = if out_frac > 0.85 {
+                    egui::Color32::from_rgb(220, 60, 60)
+                } else if out_frac > 0.6 {
+                    egui::Color32::from_rgb(60, 200, 60)
+                } else {
+                    egui::Color32::from_rgb(100, 200, 100)
+                };
+                p.rect_filled(fill, 2.0, color);
+            });
+        }
+
         ui.add_space(8.0);
         ui.separator();
+        ui.add_space(4.0);
+
+        // Profiles
+        ui.collapsing("Saved Profiles", |ui| {
+            let current_device = self.input_devices.get(self.selected_input).cloned();
+            let mut to_delete: Option<String> = None;
+            let mut to_load: Option<(String, u32)> = None;
+
+            if self.device_profiles.is_empty() {
+                ui.label(
+                    egui::RichText::new("No saved profiles yet. Calibrate or start boost to save one.")
+                        .small()
+                        .color(egui::Color32::GRAY),
+                );
+            } else {
+                let mut names: Vec<String> = self.device_profiles.keys().cloned().collect();
+                names.sort();
+                for name in &names {
+                    let profile = &self.device_profiles[name];
+                    let is_current = current_device.as_deref() == Some(name.as_str());
+                    ui.horizontal(|ui| {
+                        // Shorten long device names
+                        let short_name = if name.len() > 30 {
+                            format!("{}...", &name[..27])
+                        } else {
+                            name.clone()
+                        };
+                        let label = format!(
+                            "{} — {:.1}x",
+                            short_name,
+                            profile.boost as f32 / 100.0
+                        );
+                        if is_current {
+                            ui.label(
+                                egui::RichText::new(&label)
+                                    .small()
+                                    .strong()
+                                    .color(egui::Color32::from_rgb(100, 200, 100)),
+                            );
+                        } else if ui
+                            .link(egui::RichText::new(&label).small())
+                            .on_hover_text("Click to load this profile's boost level")
+                            .clicked()
+                        {
+                            to_load = Some((name.clone(), profile.boost));
+                        }
+                        if ui.small_button("x").on_hover_text("Delete profile").clicked() {
+                            to_delete = Some(name.clone());
+                        }
+                    });
+                }
+            }
+
+            // Apply deferred actions
+            if let Some(name) = to_delete {
+                self.device_profiles.remove(&name);
+                profiles::save(&self.device_profiles);
+            }
+            if let Some((_name, boost)) = to_load {
+                self.boost = boost;
+                if self.is_active {
+                    self.update_gain();
+                }
+            }
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                if ui.small_button("Save current").on_hover_text("Save boost for current mic").clicked() {
+                    self.save_current_profile();
+                }
+            });
+        });
+
         ui.add_space(4.0);
 
         // Test recording
