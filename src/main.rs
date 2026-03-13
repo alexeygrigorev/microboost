@@ -1918,8 +1918,16 @@ impl MicroboostApp {
             if in_pts.len() >= 2 && out_pts.len() >= 2 {
                 // Fill between the two curves to show boost amount
                 let n = in_pts.len().min(out_pts.len());
-                // Build polygon strips column by column to avoid convexity issues
+                let fill_color = egui::Color32::from_rgba_premultiplied(40, 180, 40, 25);
+                // Build polygon strips column by column; skip when curves cross
+                // to avoid bowtie artifacts from convex_polygon on non-convex quads
                 for i in 0..n - 1 {
+                    let in_above_l = in_pts[i].y <= out_pts[i].y;
+                    let in_above_r = in_pts[i + 1].y <= out_pts[i + 1].y;
+                    if in_above_l != in_above_r {
+                        // Curves cross in this segment — skip fill to avoid artifacts
+                        continue;
+                    }
                     let quad = vec![
                         in_pts[i],
                         in_pts[i + 1],
@@ -1928,7 +1936,7 @@ impl MicroboostApp {
                     ];
                     p.add(egui::Shape::convex_polygon(
                         quad,
-                        egui::Color32::from_rgba_premultiplied(40, 180, 40, 25),
+                        fill_color,
                         egui::Stroke::NONE,
                     ));
                 }
