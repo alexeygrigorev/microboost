@@ -321,6 +321,9 @@ struct MicroboostApp {
     ng_calibrating: bool,
     ng_cal_start: Option<std::time::Instant>,
     ng_cal_stream: Arc<Mutex<Option<cpal::Stream>>>,
+
+    // Hot-plug detection
+    last_device_check: std::time::Instant,
 }
 
 const RING_SIZE: usize = 48000 * 2;
@@ -421,6 +424,8 @@ impl MicroboostApp {
             ng_calibrating: false,
             ng_cal_start: None,
             ng_cal_stream: Arc::new(Mutex::new(None)),
+
+            last_device_check: std::time::Instant::now(),
         }
     }
 
@@ -456,6 +461,69 @@ impl MicroboostApp {
         self.output_devices = outputs;
         if let Some(idx) = Self::find_cable_output(&self.output_devices) {
             self.selected_output = idx;
+        }
+    }
+
+    /// Periodically check for device changes (hot-plug).
+    /// If the current device disappeared, switch to the Windows default (or first available).
+    /// If a new default device appeared that wasn't there before, switch to it.
+    fn check_device_changes(&mut self) {
+        if self.last_device_check.elapsed().as_secs() < 2 {
+            return;
+        }
+        self.last_device_check = std::time::Instant::now();
+
+        let old_devices = self.input_devices.clone();
+        let current_name = self.input_devices.get(self.selected_input).cloned();
+
+        self.refresh_devices();
+
+        // Check if device list actually changed
+        if self.input_devices == old_devices {
+            return;
+        }
+
+        // Get Windows default device name
+        let default_name = self
+            .host
+            .default_input_device()
+            .and_then(|d| d.name().ok());
+
+        // If our current device is still present, keep it
+        if let Some(ref name) = current_name {
+            if let Some(pos) = self.input_devices.iter().position(|d| d == name) {
+                self.selected_input = pos;
+                return;
+            }
+        }
+
+        // Current device disappeared — switch to default or first available
+        let new_idx = default_name
+            .as_ref()
+            .and_then(|def| self.input_devices.iter().position(|d| d == def))
+            .unwrap_or(0);
+
+        if new_idx != self.selected_input || current_name.is_none() {
+            self.selected_input = new_idx;
+            self.load_profile_for_device();
+
+            // Restart pipeline with new device
+            let was_active = self.is_active;
+            self.kill_pipeline();
+            if !self.input_devices.is_empty() {
+                self.start_pipeline();
+                if !was_active {
+                    self.stop_pipeline();
+                }
+            }
+
+            let dev_name = self
+                .input_devices
+                .get(self.selected_input)
+                .cloned()
+                .unwrap_or("none".to_string());
+            *self.status.lock().unwrap() =
+                format!("Device changed — switched to {}", dev_name);
         }
     }
 
@@ -1238,6 +1306,14 @@ impl eframe::App for MicroboostApp {
             self.start_pipeline();
         }
 
+        // Periodic device hot-plug detection
+        if self.setup_state == SetupState::Ready
+            && !self.ng_calibrating
+            && self.cal_phase == CalibrationPhase::Idle
+        {
+            self.check_device_changes();
+        }
+
         // Auto-finish calibration after 5 seconds
         if self.cal_phase == CalibrationPhase::Listening {
             if let Some(start) = self.cal_start {
@@ -1265,6 +1341,9 @@ impl eframe::App for MicroboostApp {
             || matches!(self.setup_state, SetupState::Downloading)
         {
             ctx.request_repaint();
+        } else if self.setup_state == SetupState::Ready {
+            // Repaint every 2s for device hot-plug detection even when idle
+            ctx.request_repaint_after(std::time::Duration::from_secs(2));
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
