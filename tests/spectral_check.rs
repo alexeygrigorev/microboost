@@ -51,8 +51,8 @@ fn avg_band_energy(samples: &[f32], rate: u32, lo: f32, hi: f32) -> f32 {
 
 #[test]
 fn spectral_comparison() {
-    let (mic, mr) = load_wav("tests/dual_mic.wav");
-    let (cable, cr) = load_wav("tests/dual_cable.wav");
+    let (mic, mr) = load_wav("tests/.tmp/dual_mic.wav");
+    let (cable, cr) = load_wav("tests/.tmp/dual_cable.wav");
 
     eprintln!("Analyzing full recordings (voiced segments only)...");
     eprintln!("Mic: {} samples, Cable: {} samples", mic.len(), cable.len());

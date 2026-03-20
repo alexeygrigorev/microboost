@@ -51,8 +51,8 @@ fn peak_frequency(samples: &[f32], sample_rate: u32) -> (f32, f32) {
 
 #[test]
 fn analyze_noise_difference() {
-    let (mic, mic_rate) = load_wav("tests/rec_mic_direct.wav");
-    let (cable, cable_rate) = load_wav("tests/rec_cable_output.wav");
+    let (mic, mic_rate) = load_wav("tests/.tmp/rec_mic_direct.wav");
+    let (cable, cable_rate) = load_wav("tests/.tmp/rec_cable_output.wav");
 
     eprintln!("=== Direct mic ===");
     eprintln!("  Samples: {}, Rate: {}Hz", mic.len(), mic_rate);

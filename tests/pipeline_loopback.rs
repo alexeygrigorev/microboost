@@ -190,7 +190,7 @@ fn voice_through_pipeline_and_cable() {
         sample_format: hound::SampleFormat::Float,
     };
 
-    let mut w = hound::WavWriter::create("tests/voice_through_pipeline.wav", spec).unwrap();
+    let mut w = hound::WavWriter::create("tests/.tmp/voice_through_pipeline.wav", spec).unwrap();
     for &s in rec.iter() {
         w.write_sample(s).unwrap();
     }

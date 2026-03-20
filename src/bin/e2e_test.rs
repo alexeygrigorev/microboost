@@ -63,6 +63,7 @@ fn avg_band_energy(samples: &[f32], rate: u32, lo: f32, hi: f32) -> f32 {
 }
 
 fn main() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     // Step 1: Send voice directly to CABLE (no ring buffer) as baseline
     let (voice, voice_rate) = load_wav("tests/test_voice.wav");
     println!("Voice: {} samples, {}Hz, {:.2}s", voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
@@ -92,9 +93,9 @@ fn main() {
         channels: 1, sample_rate: out_rate,
         bits_per_sample: 32, sample_format: hound::SampleFormat::Float,
     };
-    save_wav("tests/e2e_original.wav", &voice, spec);
-    save_wav("tests/e2e_direct.wav", &recorded_a, spec);
-    save_wav("tests/e2e_ring.wav", &recorded_b, spec);
+    save_wav("tests/.tmp/e2e_original.wav", &voice, spec);
+    save_wav("tests/.tmp/e2e_direct.wav", &recorded_a, spec);
+    save_wav("tests/.tmp/e2e_ring.wav", &recorded_b, spec);
 
     // Compare
     println!("\n=== COMPARISON ===");

@@ -5,6 +5,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
 
 fn main() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     let host = cpal::default_host();
     let args: Vec<String> = std::env::args().collect();
 
@@ -116,8 +117,8 @@ fn main() {
         w.finalize().unwrap();
     };
 
-    save("tests/dual_mic.wav", &mic_data, mic_rate);
-    save("tests/dual_cable.wav", &cable_data, cable_rate);
+    save("tests/.tmp/dual_mic.wav", &mic_data, mic_rate);
+    save("tests/.tmp/dual_cable.wav", &cable_data, cable_rate);
 
     let rms = |d: &[f32]| -> f32 { (d.iter().map(|s| s * s).sum::<f32>() / d.len() as f32).sqrt() };
     let m_rms = rms(&mic_data);

@@ -33,6 +33,7 @@ fn find_cable_device(host: &cpal::Host, name_contains: &str, input: bool) -> cpa
 }
 
 fn main() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     let (voice, voice_rate) = load_wav("tests/test_voice.wav");
     println!("Loaded: {} samples, {}Hz, {:.2}s", voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
 
@@ -186,12 +187,12 @@ fn main() {
         sample_format: hound::SampleFormat::Float,
     };
 
-    let mut w1 = hound::WavWriter::create("tests/pipeline_original.wav", spec).unwrap();
+    let mut w1 = hound::WavWriter::create("tests/.tmp/pipeline_original.wav", spec).unwrap();
     for &s in voice.iter() { w1.write_sample(s).unwrap(); }
     w1.finalize().unwrap();
 
     let spec2 = hound::WavSpec { sample_rate: out_rate, ..spec };
-    let mut w2 = hound::WavWriter::create("tests/pipeline_output.wav", spec2).unwrap();
+    let mut w2 = hound::WavWriter::create("tests/.tmp/pipeline_output.wav", spec2).unwrap();
     for &s in rec.iter() { w2.write_sample(s).unwrap(); }
     w2.finalize().unwrap();
 

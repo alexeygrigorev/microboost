@@ -190,7 +190,7 @@ fn cable_loopback_sine() {
         bits_per_sample: 32,
         sample_format: hound::SampleFormat::Float,
     };
-    let mut writer = hound::WavWriter::create("tests/cable_loopback_recorded.wav", out_spec).unwrap();
+    let mut writer = hound::WavWriter::create("tests/.tmp/cable_loopback_recorded.wav", out_spec).unwrap();
     for &s in rec.iter() {
         writer.write_sample(s).unwrap();
     }
@@ -198,7 +198,7 @@ fn cable_loopback_sine() {
     eprintln!("\nWrote tests/cable_loopback_recorded.wav for inspection");
 
     // Write expected signal for comparison
-    let mut writer2 = hound::WavWriter::create("tests/cable_loopback_expected.wav", out_spec).unwrap();
+    let mut writer2 = hound::WavWriter::create("tests/.tmp/cable_loopback_expected.wav", out_spec).unwrap();
     for &s in test_signal.iter() {
         writer2.write_sample(s).unwrap();
     }

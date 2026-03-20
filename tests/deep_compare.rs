@@ -40,8 +40,8 @@ fn find_alignment(a: &[f32], b: &[f32], max_offset: usize) -> (usize, f32) {
 
 #[test]
 fn deep_sample_comparison() {
-    let (orig, or) = load_wav("tests/e2e_original.wav");
-    let (ring, rr) = load_wav("tests/e2e_ring.wav");
+    let (orig, or) = load_wav("tests/.tmp/e2e_original.wav");
+    let (ring, rr) = load_wav("tests/.tmp/e2e_ring.wav");
 
     eprintln!("Original: {} samples ({}Hz)", orig.len(), or);
     eprintln!("Ring out: {} samples ({}Hz)", ring.len(), rr);
@@ -205,8 +205,8 @@ fn deep_sample_comparison() {
     eprintln!("=============================");
 
     // Also compare ring vs direct (bypasses CABLE noise)
-    let (direct, dr2) = load_wav("tests/e2e_direct.wav");
-    let (ring2, _) = load_wav("tests/e2e_ring.wav");
+    let (direct, dr2) = load_wav("tests/.tmp/e2e_direct.wav");
+    let (ring2, _) = load_wav("tests/.tmp/e2e_ring.wav");
     let (off2, _) = find_alignment(&direct, &ring2, 48000);
     let clen2 = direct.len().min(ring2.len() - off2);
     let d_seg = &direct[..clen2];

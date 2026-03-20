@@ -16,8 +16,8 @@ fn rms(samples: &[f32]) -> f32 {
 
 #[test]
 fn compare_boosted_vs_direct() {
-    let (boosted, br) = load_wav("tests/rec_boosted.wav");
-    let (direct, dr) = load_wav("tests/rec_direct.wav");
+    let (boosted, br) = load_wav("tests/.tmp/rec_boosted.wav");
+    let (direct, dr) = load_wav("tests/.tmp/rec_direct.wav");
 
     let b_rms = rms(&boosted);
     let d_rms = rms(&direct);

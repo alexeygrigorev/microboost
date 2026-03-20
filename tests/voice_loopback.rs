@@ -114,13 +114,13 @@ fn voice_through_cable() {
         sample_format: hound::SampleFormat::Float,
     };
 
-    let mut w1 = hound::WavWriter::create("tests/voice_original.wav", spec).unwrap();
+    let mut w1 = hound::WavWriter::create("tests/.tmp/voice_original.wav", spec).unwrap();
     for &s in voice.iter() {
         w1.write_sample(s).unwrap();
     }
     w1.finalize().unwrap();
 
-    let mut w2 = hound::WavWriter::create("tests/voice_through_cable.wav", spec).unwrap();
+    let mut w2 = hound::WavWriter::create("tests/.tmp/voice_through_cable.wav", spec).unwrap();
     for &s in rec.iter() {
         w2.write_sample(s).unwrap();
     }

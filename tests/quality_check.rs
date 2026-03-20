@@ -43,8 +43,8 @@ fn band_energy(samples: &[f32], sample_rate: u32, lo_hz: f32, hi_hz: f32) -> f32
 
 #[test]
 fn quality_comparison() {
-    let (mic, mic_rate) = load_wav("tests/dual_mic.wav");
-    let (cable, cable_rate) = load_wav("tests/dual_cable.wav");
+    let (mic, mic_rate) = load_wav("tests/.tmp/dual_mic.wav");
+    let (cable, cable_rate) = load_wav("tests/.tmp/dual_cable.wav");
 
     eprintln!("=== Basic stats ===");
     let m_rms = rms(&mic);
