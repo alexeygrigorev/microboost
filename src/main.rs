@@ -2,12 +2,11 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
-use microboost::noise_gate;
+use microboost::{noise_gate, SpscRing, RING_SIZE};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
-
-const RING_SIZE: usize = 48000 * 2;
 
 /// Device profiles — saved per microphone name
 mod profiles {
@@ -283,9 +282,7 @@ struct MicroboostApp {
     // Audio pipeline
     input_stream: Arc<Mutex<Option<cpal::Stream>>>,
     output_stream: Arc<Mutex<Option<cpal::Stream>>>,
-    ring_buffer: Arc<Mutex<Vec<f32>>>,
-    ring_read: Arc<Mutex<usize>>,
-    ring_write: Arc<Mutex<usize>>,
+    ring_buffer: Arc<SpscRing>,
     pipeline_active: Arc<Mutex<bool>>,
     live_gain: Arc<Mutex<f32>>,       // Shared gain: updated without restarting pipeline
     live_input_rms: Arc<Mutex<f32>>,  // Raw input level for visualizer
@@ -395,9 +392,7 @@ impl MicroboostApp {
             setup_thread: None,
             input_stream: Arc::new(Mutex::new(None)),
             output_stream: Arc::new(Mutex::new(None)),
-            ring_buffer: Arc::new(Mutex::new(vec![0.0; RING_SIZE])),
-            ring_read: Arc::new(Mutex::new(0)),
-            ring_write: Arc::new(Mutex::new(0)),
+            ring_buffer: Arc::new(SpscRing::new(RING_SIZE)),
             pipeline_active: Arc::new(Mutex::new(false)),
             live_gain: Arc::new(Mutex::new(1.0)),
             live_input_rms: Arc::new(Mutex::new(0.0)),
@@ -643,17 +638,11 @@ impl MicroboostApp {
         );
 
         // Reset ring buffer
-        {
-            let mut buf = self.ring_buffer.lock().unwrap();
-            buf.iter_mut().for_each(|s| *s = 0.0);
-            *self.ring_read.lock().unwrap() = 0;
-            *self.ring_write.lock().unwrap() = 0;
-        }
+        self.ring_buffer.reset();
 
         *self.pipeline_active.lock().unwrap() = true;
 
-        let ring_buf = self.ring_buffer.clone();
-        let ring_w = self.ring_write.clone();
+        let ring = self.ring_buffer.clone();
         let active = self.pipeline_active.clone();
         let gain_shared = self.live_gain.clone();
         let input_rms = self.live_input_rms.clone();
@@ -675,15 +664,12 @@ impl MicroboostApp {
                 let mut sum_raw = 0.0f32;
                 let mut sum_out = 0.0f32;
                 let mut count = 0usize;
-                let mut buf = ring_buf.lock().unwrap();
-                let mut w = ring_w.lock().unwrap();
                 for chunk in data.chunks(in_channels) {
                     let mono = chunk[0];
                     let boosted = (mono * gain).clamp(-1.0, 1.0);
                     // Apply noise gate after boost
                     let gated = gate.process(boosted);
-                    buf[*w % RING_SIZE] = gated;
-                    *w = (*w + 1) % (RING_SIZE * 2);
+                    ring.push(gated);
                     sum_raw += mono * mono;
                     sum_out += gated * gated;
                     count += 1;
@@ -701,9 +687,7 @@ impl MicroboostApp {
             None,
         );
 
-        let ring_buf2 = self.ring_buffer.clone();
-        let ring_r = self.ring_read.clone();
-        let ring_w2 = self.ring_write.clone();
+        let ring2 = self.ring_buffer.clone();
         let active2 = self.pipeline_active.clone();
 
         let output_stream = output_device.build_output_stream(
@@ -713,14 +697,11 @@ impl MicroboostApp {
                     data.iter_mut().for_each(|s| *s = 0.0);
                     return;
                 }
-                let buf = ring_buf2.lock().unwrap();
-                let mut r = ring_r.lock().unwrap();
-                let w = *ring_w2.lock().unwrap();
 
                 for frame in data.chunks_mut(out_channels) {
-                    let sample = if *r != w {
-                        let s = buf[*r % RING_SIZE];
-                        *r = (*r + 1) % (RING_SIZE * 2);
+                    let sample = if ring2.available() > 0 {
+                        let s = ring2.peek(0);
+                        ring2.advance(1);
                         s
                     } else {
                         0.0
@@ -1073,21 +1054,19 @@ impl MicroboostApp {
 
         if self.is_active {
             // Pipeline is running — tap into the ring buffer
-            let ring_buf = self.ring_buffer.clone();
-            let ring_w = self.ring_write.clone();
+            let ring = self.ring_buffer.clone();
             let rec_samples = self.rec_samples.clone();
             let rec_active = self.rec_active.clone();
             self.sample_rate = 48000; // approximate, will be close enough
 
             std::thread::spawn(move || {
-                let mut last_w = *ring_w.lock().unwrap();
+                let mut last_w = ring.write.load(Ordering::Acquire);
                 while *rec_active.lock().unwrap() {
                     std::thread::sleep(std::time::Duration::from_millis(10));
-                    let buf = ring_buf.lock().unwrap();
-                    let w = *ring_w.lock().unwrap();
+                    let w = ring.write.load(Ordering::Acquire);
                     let mut samples = rec_samples.lock().unwrap();
                     while last_w != w {
-                        samples.push(buf[last_w % RING_SIZE]);
+                        samples.push(ring.read_at(last_w));
                         last_w = (last_w + 1) % (RING_SIZE * 2);
                     }
                 }
