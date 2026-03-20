@@ -451,6 +451,11 @@ impl MicroboostApp {
         (inputs, outputs)
     }
 
+    /// Find an input device by name (avoids index mismatch when CABLE is filtered from UI)
+    fn find_input_device_by_name(host: &cpal::Host, name: &str) -> Option<cpal::Device> {
+        host.input_devices().ok()?.find(|d| d.name().ok().as_deref() == Some(name))
+    }
+
     fn find_cable_output(devices: &[String]) -> Option<usize> {
         devices.iter().position(|name| {
             let lower = name.to_lowercase();
@@ -584,10 +589,9 @@ impl MicroboostApp {
         }
 
         let input_device = self
-            .host
-            .input_devices()
-            .ok()
-            .and_then(|mut devs| devs.nth(self.selected_input));
+            .input_devices
+            .get(self.selected_input)
+            .and_then(|name| Self::find_input_device_by_name(&self.host, name));
 
         let output_device = self
             .host
@@ -840,10 +844,9 @@ impl MicroboostApp {
                 % CALIBRATION_PHRASES.len();
 
         let device = self
-            .host
-            .input_devices()
-            .ok()
-            .and_then(|mut devs| devs.nth(self.selected_input))
+            .input_devices
+            .get(self.selected_input)
+            .and_then(|name| Self::find_input_device_by_name(&self.host, name))
             .or_else(|| self.host.default_input_device());
 
         if let Some(device) = device {
@@ -964,10 +967,9 @@ impl MicroboostApp {
         self.ng_cal_start = Some(std::time::Instant::now());
 
         let device = self
-            .host
-            .input_devices()
-            .ok()
-            .and_then(|mut devs| devs.nth(self.selected_input))
+            .input_devices
+            .get(self.selected_input)
+            .and_then(|name| Self::find_input_device_by_name(&self.host, name))
             .or_else(|| self.host.default_input_device());
 
         if let Some(device) = device {
@@ -1076,10 +1078,9 @@ impl MicroboostApp {
         } else {
             // Pipeline not running — open mic directly
             let device = self
-                .host
-                .input_devices()
-                .ok()
-                .and_then(|mut devs| devs.nth(self.selected_input))
+                .input_devices
+                .get(self.selected_input)
+                .and_then(|name| Self::find_input_device_by_name(&self.host, name))
                 .or_else(|| self.host.default_input_device());
 
             if let Some(device) = device {
