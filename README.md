@@ -2,13 +2,25 @@
 
 A Windows microphone booster that amplifies your mic for other apps (Discord, Teams, etc.) using a real-time audio pipeline through VB-CABLE.
 
-![Microboost screenshot](screenshot.png)
+<img src="screenshot.png" width="400" alt="Microboost screenshot">
 
 [Watch the demo on Loom](https://www.loom.com/share/8ebfbaf4b31f49fba5b1fdbee01ebd5f)
 
 ## How it works
 
-Microboost captures audio from your real microphone, applies software gain (up to 10x), and routes the boosted audio to a virtual audio cable. Other apps then use the virtual cable as their microphone input, hearing the amplified audio.
+```
+Microphone → [capture] → gain × boost → noise gate → ring buffer → [playback] → VB-CABLE
+                                                                                    ↓
+                                                                Discord/Teams/Zoom picks up
+                                                                "CABLE Output" as microphone
+```
+
+1. The audio driver delivers mic samples via an input callback
+2. Each sample is multiplied by the boost factor (e.g. 2.0x) and clamped to [-1, 1]
+3. If the noise gate is calibrated, quiet samples below the learned noise floor are faded to silence
+4. Processed samples are written to a lock-free ring buffer (a circular array using atomic operations, so the input and output callbacks never block each other)
+5. A separate output callback reads from the ring buffer and writes to VB-CABLE's virtual input
+6. Apps like Discord see "CABLE Output" as a microphone and receive the boosted audio
 
 On first launch, the app will offer to download and install VB-CABLE (free) automatically.
 
@@ -70,6 +82,32 @@ make kill       # Kill running instance
 make clean      # Clean build artifacts
 make folder     # Open recordings folder
 make rebuild    # Kill, rebuild, then run: make open
+```
+
+### Tests
+
+Unit tests verify the audio pipeline produces identical output at 1x boost:
+
+```bash
+cargo test --release --target x86_64-pc-windows-msvc
+```
+
+Tests include:
+- `passthrough_test` — verifies 1x boost is identity, 2x doubles signal, noise gate works, sample rate conversion is correct
+- `cable_loopback` — sends a sine wave through VB-CABLE and measures distortion (requires VB-CABLE installed)
+- `deep_compare` — sample-level cross-correlation comparison of pipeline output vs original (SNR, alignment)
+- `quality_check` — automated quality analysis: clipping, noise floor, smoothness, frequency balance
+- `spectral_check` — frequency band comparison across full recordings
+
+End-to-end test tools (in `src/bin/`):
+- `e2e_test` — feeds a WAV through the ring buffer + CABLE and compares direct vs ring buffer output
+- `audio_test` — records simultaneously from a mic and CABLE Output for comparison
+- `pipeline_test` — feeds a WAV through the full pipeline and records from CABLE
+
+Run the e2e test (requires VB-CABLE):
+
+```bash
+cargo run --release --target x86_64-pc-windows-msvc --bin e2e_test
 ```
 
 ## Tech Stack

@@ -77,7 +77,7 @@ fn run_pipeline(
 
 #[test]
 fn real_voice_1x_passthrough() {
-    let (input, _) = load_wav("tests/test_voice.wav");
+    let (input, _) = load_wav("tests/fixtures/test_voice.wav");
     assert!(input.len() > 48000, "recording too short");
 
     let mut gate = noise_gate::NoiseGate::new(); // disabled
@@ -111,7 +111,7 @@ fn real_voice_1x_passthrough() {
 
 #[test]
 fn real_voice_2x_boost() {
-    let (input, _) = load_wav("tests/test_voice.wav");
+    let (input, _) = load_wav("tests/fixtures/test_voice.wav");
     let mut gate = noise_gate::NoiseGate::new();
     let output = run_pipeline(&input, 2.0, &mut gate, 1.0);
 
@@ -134,7 +134,7 @@ fn real_voice_2x_boost() {
 
 #[test]
 fn real_voice_050x_attenuate() {
-    let (input, _) = load_wav("tests/test_voice.wav");
+    let (input, _) = load_wav("tests/fixtures/test_voice.wav");
     let mut gate = noise_gate::NoiseGate::new();
     let output = run_pipeline(&input, 0.5, &mut gate, 1.0);
 
@@ -152,7 +152,7 @@ fn real_voice_050x_attenuate() {
 
 #[test]
 fn real_voice_with_noise_gate() {
-    let (input, _) = load_wav("tests/test_voice.wav");
+    let (input, _) = load_wav("tests/fixtures/test_voice.wav");
 
     let mut gate = noise_gate::NoiseGate::new();
     let silence = vec![0.001f32; 48000];
@@ -184,7 +184,7 @@ fn real_voice_with_noise_gate() {
 
 #[test]
 fn pipeline_mismatched_sample_rate() {
-    let (input, _) = load_wav("tests/test_voice.wav");
+    let (input, _) = load_wav("tests/fixtures/test_voice.wav");
     let mut gate = noise_gate::NoiseGate::new();
 
     // Simulate 48kHz input, 44.1kHz output

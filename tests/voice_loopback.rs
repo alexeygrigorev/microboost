@@ -29,15 +29,24 @@ fn load_wav(path: &str) -> (Vec<f32>, u32) {
     (samples, spec.sample_rate)
 }
 
-#[ignore] // requires manual recording
 #[test]
 fn voice_through_cable() {
+    let fixture = "tests/fixtures/test_voice.wav";
+    if !std::path::Path::new(fixture).exists() {
+        eprintln!("Skipping: {} not found (run audio_test/e2e_test first)", fixture);
+        return;
+    }
+    let host = cpal::default_host();
+    let has_cable = host.output_devices().unwrap().any(|d| d.name().map(|n| n.to_lowercase().contains("cable")).unwrap_or(false));
+    if !has_cable {
+        eprintln!("Skipping: VB-CABLE not installed");
+        return;
+    }
     std::fs::create_dir_all("tests/.tmp").ok();
-    let (voice, voice_rate) = load_wav("tests/test_voice.wav");
+    let (voice, voice_rate) = load_wav(fixture);
     eprintln!("Loaded voice: {} samples, {}Hz, {:.2}s",
         voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
 
-    let host = cpal::default_host();
     let cable_out = find_device(&host, "CABLE Input", false)
         .expect("CABLE Input (playback) not found");
     let cable_in = find_device(&host, "CABLE Output", true)

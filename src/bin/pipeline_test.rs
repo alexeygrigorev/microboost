@@ -34,7 +34,7 @@ fn find_cable_device(host: &cpal::Host, name_contains: &str, input: bool) -> cpa
 
 fn main() {
     std::fs::create_dir_all("tests/.tmp").ok();
-    let (voice, voice_rate) = load_wav("tests/test_voice.wav");
+    let (voice, voice_rate) = load_wav("tests/fixtures/test_voice.wav");
     println!("Loaded: {} samples, {}Hz, {:.2}s", voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
 
     let host = cpal::default_host();

@@ -38,11 +38,16 @@ fn find_alignment(a: &[f32], b: &[f32], max_offset: usize) -> (usize, f32) {
     (best_offset, best_corr)
 }
 
-#[ignore] // requires manual recording
 #[test]
 fn deep_sample_comparison() {
-    let (orig, or) = load_wav("tests/.tmp/e2e_original.wav");
-    let (ring, rr) = load_wav("tests/.tmp/e2e_ring.wav");
+    let path1 = "tests/fixtures/e2e_original.wav";
+    let path2 = "tests/fixtures/e2e_ring.wav";
+    if !std::path::Path::new(path1).exists() || !std::path::Path::new(path2).exists() {
+        eprintln!("Skipping: {} or {} not found", path1, path2);
+        return;
+    }
+    let (orig, or) = load_wav(path1);
+    let (ring, rr) = load_wav(path2);
 
     eprintln!("Original: {} samples ({}Hz)", orig.len(), or);
     eprintln!("Ring out: {} samples ({}Hz)", ring.len(), rr);
@@ -206,8 +211,8 @@ fn deep_sample_comparison() {
     eprintln!("=============================");
 
     // Also compare ring vs direct (bypasses CABLE noise)
-    let (direct, dr2) = load_wav("tests/.tmp/e2e_direct.wav");
-    let (ring2, _) = load_wav("tests/.tmp/e2e_ring.wav");
+    let (direct, dr2) = load_wav("tests/fixtures/e2e_direct.wav");
+    let (ring2, _) = load_wav("tests/fixtures/e2e_ring.wav");
     let (off2, _) = find_alignment(&direct, &ring2, 48000);
     let clen2 = direct.len().min(ring2.len() - off2);
     let d_seg = &direct[..clen2];

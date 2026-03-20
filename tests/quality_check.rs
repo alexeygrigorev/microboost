@@ -41,19 +41,24 @@ fn band_energy(samples: &[f32], sample_rate: u32, lo_hz: f32, hi_hz: f32) -> f32
     energy as f32
 }
 
-#[ignore] // requires manual recording
 #[test]
 fn quality_comparison() {
-    let (mic, mic_rate) = load_wav("tests/.tmp/dual_mic.wav");
-    let (cable, cable_rate) = load_wav("tests/.tmp/dual_cable.wav");
+    let path1 = "tests/fixtures/e2e_original.wav";
+    let path2 = "tests/fixtures/e2e_ring.wav";
+    if !std::path::Path::new(path1).exists() || !std::path::Path::new(path2).exists() {
+        eprintln!("Skipping: {} or {} not found", path1, path2);
+        return;
+    }
+    let (mic, mic_rate) = load_wav(path1);
+    let (cable, cable_rate) = load_wav(path2);
 
     eprintln!("=== Basic stats ===");
     let m_rms = rms(&mic);
     let c_rms = rms(&cable);
     let m_peak = mic.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
     let c_peak = cable.iter().map(|s| s.abs()).fold(0.0f32, f32::max);
-    eprintln!("Mic:   {} samples, RMS={:.4} ({:.1}dB), peak={:.4}", mic.len(), m_rms, rms_db(m_rms), m_peak);
-    eprintln!("Cable: {} samples, RMS={:.4} ({:.1}dB), peak={:.4}", cable.len(), c_rms, rms_db(c_rms), c_peak);
+    eprintln!("Original (mic): {} samples, RMS={:.4} ({:.1}dB), peak={:.4}", mic.len(), m_rms, rms_db(m_rms), m_peak);
+    eprintln!("Ring pipeline (cable): {} samples, RMS={:.4} ({:.1}dB), peak={:.4}", cable.len(), c_rms, rms_db(c_rms), c_peak);
     eprintln!("Ratio: {:.2}x", c_rms / m_rms);
 
     // === Clipping check ===

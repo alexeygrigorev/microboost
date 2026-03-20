@@ -49,14 +49,19 @@ fn avg_band_energy(samples: &[f32], rate: u32, lo: f32, hi: f32) -> f32 {
     if count > 0 { (total / count as f64) as f32 } else { 0.0 }
 }
 
-#[ignore] // requires manual recording
 #[test]
 fn spectral_comparison() {
-    let (mic, mr) = load_wav("tests/.tmp/dual_mic.wav");
-    let (cable, cr) = load_wav("tests/.tmp/dual_cable.wav");
+    let path1 = "tests/fixtures/e2e_original.wav";
+    let path2 = "tests/fixtures/e2e_ring.wav";
+    if !std::path::Path::new(path1).exists() || !std::path::Path::new(path2).exists() {
+        eprintln!("Skipping: {} or {} not found", path1, path2);
+        return;
+    }
+    let (mic, mr) = load_wav(path1);
+    let (cable, cr) = load_wav(path2);
 
     eprintln!("Analyzing full recordings (voiced segments only)...");
-    eprintln!("Mic: {} samples, Cable: {} samples", mic.len(), cable.len());
+    eprintln!("Original (mic): {} samples, Ring pipeline (cable): {} samples", mic.len(), cable.len());
 
     let bands = [
         (80.0, 300.0, "Sub/Low (80-300Hz)"),

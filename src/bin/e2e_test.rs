@@ -65,7 +65,7 @@ fn avg_band_energy(samples: &[f32], rate: u32, lo: f32, hi: f32) -> f32 {
 fn main() {
     std::fs::create_dir_all("tests/.tmp").ok();
     // Step 1: Send voice directly to CABLE (no ring buffer) as baseline
-    let (voice, voice_rate) = load_wav("tests/test_voice.wav");
+    let (voice, voice_rate) = load_wav("tests/fixtures/test_voice.wav");
     println!("Voice: {} samples, {}Hz, {:.2}s", voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
 
     let host = cpal::default_host();

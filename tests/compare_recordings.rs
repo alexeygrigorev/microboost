@@ -49,20 +49,25 @@ fn peak_frequency(samples: &[f32], sample_rate: u32) -> (f32, f32) {
     (max_freq, max_mag)
 }
 
-#[ignore] // requires manual recording
 #[test]
 fn analyze_noise_difference() {
-    let (mic, mic_rate) = load_wav("tests/.tmp/rec_mic_direct.wav");
-    let (cable, cable_rate) = load_wav("tests/.tmp/rec_cable_output.wav");
+    let path1 = "tests/fixtures/e2e_original.wav";
+    let path2 = "tests/fixtures/e2e_ring.wav";
+    if !std::path::Path::new(path1).exists() || !std::path::Path::new(path2).exists() {
+        eprintln!("Skipping: {} or {} not found", path1, path2);
+        return;
+    }
+    let (mic, mic_rate) = load_wav(path1);
+    let (cable, cable_rate) = load_wav(path2);
 
-    eprintln!("=== Direct mic ===");
+    eprintln!("=== Original (mic) ===");
     eprintln!("  Samples: {}, Rate: {}Hz", mic.len(), mic_rate);
     eprintln!("  RMS: {:.6} ({:.1} dBFS)", rms(&mic), rms_db(&mic));
     eprintln!("  Peak sample: {:.6}", mic.iter().map(|s| s.abs()).fold(0.0f32, f32::max));
     let (mf, mm) = peak_frequency(&mic, mic_rate);
     eprintln!("  Peak frequency: {:.0}Hz (mag={:.2})", mf, mm);
 
-    eprintln!("\n=== Cable output ===");
+    eprintln!("\n=== Ring buffer pipeline (cable) ===");
     eprintln!("  Samples: {}, Rate: {}Hz", cable.len(), cable_rate);
     eprintln!("  RMS: {:.6} ({:.1} dBFS)", rms(&cable), rms_db(&cable));
     eprintln!("  Peak sample: {:.6}", cable.iter().map(|s| s.abs()).fold(0.0f32, f32::max));
