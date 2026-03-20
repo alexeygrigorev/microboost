@@ -1,6 +1,6 @@
 # Microboost
 
-A Windows microphone booster that amplifies your mic for other apps (Discord, Teams, etc.) using a real-time audio pipeline through VB-CABLE.
+A Windows microphone booster that amplifies your mic for other apps (Discord, Teams, etc.) using a real-time audio pipeline through [VB-CABLE](https://vb-audio.com/Cable/) — a free virtual audio cable driver that creates a pair of connected audio devices (one for input, one for output) so audio can be routed between applications.
 
 <img src="screenshot.png" width="400" alt="Microboost screenshot">
 
