@@ -2,11 +2,12 @@
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
+use microboost::noise_gate;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-mod noise_gate;
+const RING_SIZE: usize = 48000 * 2;
 
 /// Device profiles — saved per microphone name
 mod profiles {
@@ -263,6 +264,7 @@ const CALIBRATION_PHRASES: &[&str] = &[
 /// YouTube recommended voice target: ~-16 dBFS RMS (0.16 linear)
 const TARGET_RMS: f32 = 0.16;
 
+
 struct MicroboostApp {
     host: cpal::Host,
     input_devices: Vec<String>,
@@ -290,6 +292,9 @@ struct MicroboostApp {
     live_output_rms: Arc<Mutex<f32>>, // Boosted output level for visualizer
     input_history: Vec<f32>,   // Rolling waveform history (RMS values)
     output_history: Vec<f32>,
+    vis_frame: u32,            // Frame counter for slowing down visualizer
+    vis_accum_in: f32,         // Accumulated input RMS across frames
+    vis_accum_out: f32,        // Accumulated output RMS across frames
 
     // Test recording
     is_recording: bool,
@@ -324,9 +329,9 @@ struct MicroboostApp {
 
     // Hot-plug detection
     last_device_check: std::time::Instant,
+
 }
 
-const RING_SIZE: usize = 48000 * 2;
 
 impl MicroboostApp {
     fn new() -> Self {
@@ -399,6 +404,9 @@ impl MicroboostApp {
             live_output_rms: Arc::new(Mutex::new(0.0)),
             input_history: vec![0.0; 120],
             output_history: vec![0.0; 120],
+            vis_frame: 0,
+            vis_accum_in: 0.0,
+            vis_accum_out: 0.0,
             is_recording: false,
             recording_start: None,
             last_recording: None,
@@ -627,8 +635,12 @@ impl MicroboostApp {
             buffer_size: cpal::BufferSize::Default,
         };
 
-        // Simple sample rate ratio for conversion
         let rate_ratio = in_sample_rate.0 as f64 / out_sample_rate.0 as f64;
+
+        eprintln!(
+            "Pipeline: in={}Hz out={}Hz ratio={:.4} in_ch={} out_ch={}",
+            in_sample_rate.0, out_sample_rate.0, rate_ratio, in_channels, out_channels
+        );
 
         // Reset ring buffer
         {
@@ -660,13 +672,13 @@ impl MicroboostApp {
                 }
                 let gain = *gain_shared.lock().unwrap();
                 let mut gate = ng.lock().unwrap();
-                let mut buf = ring_buf.lock().unwrap();
-                let mut w = ring_w.lock().unwrap();
                 let mut sum_raw = 0.0f32;
                 let mut sum_out = 0.0f32;
                 let mut count = 0usize;
+                let mut buf = ring_buf.lock().unwrap();
+                let mut w = ring_w.lock().unwrap();
                 for chunk in data.chunks(in_channels) {
-                    let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                    let mono = chunk[0];
                     let boosted = (mono * gain).clamp(-1.0, 1.0);
                     // Apply noise gate after boost
                     let gated = gate.process(boosted);
@@ -693,8 +705,6 @@ impl MicroboostApp {
         let ring_r = self.ring_read.clone();
         let ring_w2 = self.ring_write.clone();
         let active2 = self.pipeline_active.clone();
-        // Track fractional read position for sample rate conversion
-        let frac_pos = Arc::new(Mutex::new(0.0f64));
 
         let output_stream = output_device.build_output_stream(
             &out_config,
@@ -706,25 +716,15 @@ impl MicroboostApp {
                 let buf = ring_buf2.lock().unwrap();
                 let mut r = ring_r.lock().unwrap();
                 let w = *ring_w2.lock().unwrap();
-                let mut frac = frac_pos.lock().unwrap();
 
-                // Output is interleaved with out_channels per frame
                 for frame in data.chunks_mut(out_channels) {
                     let sample = if *r != w {
                         let s = buf[*r % RING_SIZE];
-                        // Advance read position by rate ratio
-                        *frac += rate_ratio;
-                        while *frac >= 1.0 {
-                            *frac -= 1.0;
-                            if *r != w {
-                                *r = (*r + 1) % (RING_SIZE * 2);
-                            }
-                        }
+                        *r = (*r + 1) % (RING_SIZE * 2);
                         s
                     } else {
-                        0.0 // underrun
+                        0.0
                     };
-                    // Write same sample to all output channels
                     for ch in frame.iter_mut() {
                         *ch = sample;
                     }
@@ -746,9 +746,13 @@ impl MicroboostApp {
                         .cloned()
                         .unwrap_or_default();
                     *self.status.lock().unwrap() = format!(
-                        "Boosting {:.0}x -> {}",
+                        "Boosting {:.1}x -> {} ({}Hz {}ch -> {}Hz {}ch)",
                         self.boost as f32 / 100.0,
-                        out_name
+                        out_name,
+                        in_sample_rate.0,
+                        in_channels,
+                        out_sample_rate.0,
+                        out_channels,
                     );
                 } else {
                     *self.status.lock().unwrap() = "Failed to start audio streams".to_string();
@@ -838,7 +842,7 @@ impl MicroboostApp {
     }
 
     fn start_calibration(&mut self) {
-        // Kill pipeline — we need raw mic levels for calibration
+        // Kill pipeline during calibration to avoid two streams on the same device
         self.kill_pipeline();
 
         *self.cal_samples.lock().unwrap() = Vec::new();
@@ -878,7 +882,7 @@ impl MicroboostApp {
                         }
                         let mut s = samples.lock().unwrap();
                         for chunk in data.chunks(input_channels) {
-                            let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                            let mono = chunk[0];
                             s.push(mono); // Raw, no boost
                         }
                         // Update live RMS over last ~0.3s
@@ -937,21 +941,21 @@ impl MicroboostApp {
         // Calculate needed boost
         let needed = TARGET_RMS / raw_rms;
         let boost_pct = (needed * 100.0).round() as u32;
-        let boost_pct = boost_pct.clamp(100, 500);
+        let boost_pct = boost_pct.clamp(10, 500);
 
         let raw_db = 20.0 * raw_rms.log10();
         let boosted_rms = (raw_rms * boost_pct as f32 / 100.0).min(1.0);
         let boosted_db = 20.0 * boosted_rms.log10();
         let target_db = 20.0 * TARGET_RMS.log10();
 
-        self.boost = boost_pct;
         self.cal_phase = CalibrationPhase::Done {
             boost_pct,
             raw_db,
             boosted_db,
             target_db,
         };
-        self.save_current_profile();
+        // Restart pipeline with current boost while user reviews results
+        self.start_pipeline();
         *self.status.lock().unwrap() = format!(
             "Voice: {:.1} dB -> Boosted: {:.1} dB (target: {:.1} dB)",
             raw_db, boosted_db, target_db
@@ -963,10 +967,11 @@ impl MicroboostApp {
         *self.cal_stream.lock().unwrap() = None;
         self.cal_phase = CalibrationPhase::Idle;
         *self.status.lock().unwrap() = "Calibration cancelled".to_string();
+        self.start_pipeline();
     }
 
     fn start_noise_calibration(&mut self) {
-        // Kill pipeline so we can capture raw mic
+        // Kill pipeline during calibration to avoid two streams on the same device
         self.kill_pipeline();
 
         {
@@ -998,7 +1003,7 @@ impl MicroboostApp {
                             return;
                         }
                         for chunk in data.chunks(input_channels) {
-                            let mono = chunk.iter().sum::<f32>() / chunk.len() as f32;
+                            let mono = chunk[0];
                             cal.samples.push(mono);
                         }
                     },
@@ -1057,7 +1062,6 @@ impl MicroboostApp {
         self.ng_calibrating = false;
         self.ng_cal_start = None;
         *self.status.lock().unwrap() = "Noise calibration cancelled".to_string();
-        // Restart pipeline
         self.start_pipeline();
     }
 
@@ -1115,7 +1119,7 @@ impl MicroboostApp {
                                 let mut s = samples.lock().unwrap();
                                 for chunk in data.chunks(input_channels) {
                                     let mono =
-                                        chunk.iter().sum::<f32>() / chunk.len() as f32;
+                                        chunk[0];
                                     s.push((mono * gain).clamp(-1.0, 1.0));
                                 }
                             }
@@ -1499,13 +1503,13 @@ impl MicroboostApp {
         ui.add_space(8.0);
 
         // Boost slider (capped at 500%, manual entry for higher)
-        let boost_presets = [100, 150, 200, 300, 400, 500];
+        let boost_presets = [10, 25, 50, 100, 150, 200, 300, 400, 500];
         let prev_boost = self.boost;
         ui.horizontal(|ui| {
             ui.label("Boost:");
             let drag = ui.add(
                 egui::DragValue::new(&mut self.boost)
-                    .range(100..=1000)
+                    .range(10..=1000)
                     .speed(10)
                     .suffix("%"),
             );
@@ -1513,7 +1517,7 @@ impl MicroboostApp {
             if drag.changed() {
                 // Round to nearest 10
                 self.boost = ((self.boost + 5) / 10) * 10;
-                self.boost = self.boost.clamp(100, 1000);
+                self.boost = self.boost.clamp(10, 1000);
             }
             if drag.lost_focus() && self.is_active && self.boost != prev_boost {
                 self.update_gain();
@@ -1523,12 +1527,12 @@ impl MicroboostApp {
         ui.add_space(4.0);
 
         // Slider caps at 500%
-        let slider_val = self.boost.min(500);
+        let slider_val = self.boost.clamp(10, 500);
         let mut slider_boost = slider_val;
         ui.push_id("boost_slider", |ui| {
             ui.spacing_mut().slider_width = 340.0;
             let resp = ui.add(
-                egui::Slider::new(&mut slider_boost, 100..=500)
+                egui::Slider::new(&mut slider_boost, 10..=500)
                     .show_value(false)
                     .step_by(10.0)
                     .trailing_fill(true),
@@ -1729,10 +1733,15 @@ impl MicroboostApp {
                     }
                     ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        if ui.button("Accept & Start").clicked() {
+                        if ui.button("Accept").clicked() {
+                            self.boost = boost_val;
+                            if *self.pipeline_active.lock().unwrap() {
+                                self.update_gain();
+                            } else {
+                                self.start_pipeline();
+                            }
                             self.save_current_profile();
                             self.cal_phase = CalibrationPhase::Idle;
-                            self.start_pipeline();
                         }
                         if ui.button("Re-calibrate").clicked() {
                             self.start_calibration();
@@ -1855,9 +1864,17 @@ impl MicroboostApp {
             let in_rms = *self.live_input_rms.lock().unwrap();
             let out_rms = *self.live_output_rms.lock().unwrap();
 
-            // Push to rolling history
-            self.input_history.push(in_rms);
-            self.output_history.push(out_rms);
+            // Push to rolling history every 4 frames (4x slower scroll)
+            self.vis_accum_in += in_rms;
+            self.vis_accum_out += out_rms;
+            self.vis_frame += 1;
+            if self.vis_frame >= 4 {
+                self.input_history.push(self.vis_accum_in / 4.0);
+                self.output_history.push(self.vis_accum_out / 4.0);
+                self.vis_frame = 0;
+                self.vis_accum_in = 0.0;
+                self.vis_accum_out = 0.0;
+            }
             let max_points = 150;
             if self.input_history.len() > max_points {
                 self.input_history.drain(0..self.input_history.len() - max_points);
@@ -2087,5 +2104,12 @@ impl MicroboostApp {
         ui.add_space(4.0);
         let status = self.status.lock().unwrap().clone();
         ui.label(&status);
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(format!("v{} ({})", env!("CARGO_PKG_VERSION"), env!("BUILD_TIMESTAMP")))
+                .small()
+                .color(egui::Color32::from_rgb(90, 90, 100)),
+        );
     }
 }
