@@ -2,6 +2,10 @@
 
 A Windows microphone booster that amplifies your mic for other apps (Discord, Teams, etc.) using a real-time audio pipeline through VB-CABLE.
 
+![Microboost screenshot](screenshot.png)
+
+[Watch the demo on Loom](https://www.loom.com/share/8ebfbaf4b31f49fba5b1fdbee01ebd5f)
+
 ## How it works
 
 Microboost captures audio from your real microphone, applies software gain (up to 10x), and routes the boosted audio to a virtual audio cable. Other apps then use the virtual cable as their microphone input, hearing the amplified audio.
@@ -10,11 +14,15 @@ On first launch, the app will offer to download and install VB-CABLE (free) auto
 
 ## Features
 
-- Real-time microphone boost from 1x to 10x (100% to 1000%)
-- **Auto-calibration**: detects your voice level and sets the boost to YouTube-recommended loudness (~-16 dBFS)
+- Real-time microphone boost from 0.1x to 5x (10% to 500%)
+- Auto-calibration: detects your voice level and sets the boost to YouTube-recommended loudness (~-16 dBFS)
+- Noise gate: learns your background noise and suppresses it
+- Live waveform visualizer: see input vs boosted output in real-time
+- Per-microphone profiles: saves boost and noise gate settings per device
+- Mic hot-plug detection: auto-switches when devices connect/disconnect
 - Automatic VB-CABLE setup on first run
-- Slider (up to 3x) with manual entry for higher values
 - Test recording and playback to verify your levels
+- Lock-free audio pipeline (96.7 dB SNR)
 - Native UI built with egui
 
 ## Installation
