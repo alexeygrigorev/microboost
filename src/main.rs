@@ -827,8 +827,7 @@ impl MicroboostApp {
     }
 
     fn start_calibration(&mut self) {
-        // Kill pipeline during calibration to avoid two streams on the same device
-        self.kill_pipeline();
+        // Keep pipeline running — calibration opens a second input stream for raw samples
 
         *self.cal_samples.lock().unwrap() = Vec::new();
         *self.cal_active.lock().unwrap() = true;
@@ -938,8 +937,7 @@ impl MicroboostApp {
             boosted_db,
             target_db,
         };
-        // Restart pipeline with current boost while user reviews results
-        self.start_pipeline();
+        // Pipeline kept running — no need to restart
         *self.status.lock().unwrap() = format!(
             "Voice: {:.1} dB -> Boosted: {:.1} dB (target: {:.1} dB)",
             raw_db, boosted_db, target_db
@@ -951,12 +949,10 @@ impl MicroboostApp {
         *self.cal_stream.lock().unwrap() = None;
         self.cal_phase = CalibrationPhase::Idle;
         *self.status.lock().unwrap() = "Calibration cancelled".to_string();
-        self.start_pipeline();
     }
 
     fn start_noise_calibration(&mut self) {
-        // Kill pipeline during calibration to avoid two streams on the same device
-        self.kill_pipeline();
+        // Keep pipeline running — calibration opens a second input stream for raw samples
 
         {
             let mut cal = self.ng_cal_state.lock().unwrap();
@@ -1031,9 +1027,8 @@ impl MicroboostApp {
         }
         drop(gate);
 
-        // Save noise gate to profile and restart pipeline
+        // Save noise gate to profile (pipeline keeps running)
         self.save_current_profile();
-        self.start_pipeline();
     }
 
     fn cancel_noise_calibration(&mut self) {
@@ -1045,7 +1040,6 @@ impl MicroboostApp {
         self.ng_calibrating = false;
         self.ng_cal_start = None;
         *self.status.lock().unwrap() = "Noise calibration cancelled".to_string();
-        self.start_pipeline();
     }
 
     fn start_recording(&mut self) {
