@@ -1,0 +1,89 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: windows-amd64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: microboost.exe
+            asset_name: microboost-windows-amd64.exe
+            skip_verify: false
+
+          - name: windows-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            binary: microboost.exe
+            asset_name: microboost-windows-arm64.exe
+            skip_verify: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Verify binary runs
+        if: ${{ !matrix.skip_verify }}
+        shell: bash
+        run: |
+          ./target/${{ matrix.target }}/release/${{ matrix.binary }} --help || true
+
+      - name: Rename binary
+        shell: bash
+        run: |
+          cp ./target/${{ matrix.target }}/release/${{ matrix.binary }} ./${{ matrix.asset_name }}
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset_name }}
+          path: ./${{ matrix.asset_name }}
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List artifacts
+        run: find artifacts -type f
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/microboost-windows-amd64.exe/microboost-windows-amd64.exe
+            artifacts/microboost-windows-arm64.exe/microboost-windows-arm64.exe

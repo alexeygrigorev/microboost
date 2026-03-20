@@ -20,6 +20,7 @@ fn find_device(host: &cpal::Host, name_contains: &str, input: bool) -> Option<cp
 
 #[test]
 fn cable_loopback_sine() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     let host = cpal::default_host();
 
     // Find CABLE devices
@@ -195,7 +196,7 @@ fn cable_loopback_sine() {
         writer.write_sample(s).unwrap();
     }
     writer.finalize().unwrap();
-    eprintln!("\nWrote tests/cable_loopback_recorded.wav for inspection");
+    eprintln!("\nWrote tests/.tmp/cable_loopback_recorded.wav for inspection");
 
     // Write expected signal for comparison
     let mut writer2 = hound::WavWriter::create("tests/.tmp/cable_loopback_expected.wav", out_spec).unwrap();
@@ -208,6 +209,6 @@ fn cable_loopback_sine() {
     assert!(rms > 0.1, "Signal too quiet: RMS={:.4}", rms);
     assert!(peak > 0.3, "Peak too low: {:.4}", peak);
 
-    eprintln!("\nCompare tests/cable_loopback_expected.wav vs tests/cable_loopback_recorded.wav");
+    eprintln!("\nCompare tests/.tmp/cable_loopback_expected.wav vs tests/.tmp/cable_loopback_recorded.wav");
     eprintln!("THD={:.2}% SNR={:.1}dB — listen to both files to judge quality", thd_pct, snr_db);
 }

@@ -205,7 +205,7 @@ fn main() {
     println!("Ratio: {:.2}x", r_rms / v_rms);
 
     println!("\nSaved:");
-    println!("  tests/pipeline_original.wav  (input)");
-    println!("  tests/pipeline_output.wav    (after pipeline + CABLE)");
+    println!("  tests/.tmp/pipeline_original.wav  (input)");
+    println!("  tests/.tmp/pipeline_output.wav    (after pipeline + CABLE)");
     println!("\nListen and compare!");
 }

@@ -129,5 +129,5 @@ fn main() {
     println!("\nMic   RMS: {:.4} ({:.1} dBFS)  Peak: {:.4}", m_rms, 20.0 * m_rms.log10(), m_peak);
     println!("Cable RMS: {:.4} ({:.1} dBFS)  Peak: {:.4}", c_rms, 20.0 * c_rms.log10(), c_peak);
     println!("Cable/Mic ratio: {:.2}x", c_rms / m_rms);
-    println!("\nSaved: tests/dual_mic.wav and tests/dual_cable.wav");
+    println!("\nSaved: tests/.tmp/dual_mic.wav and tests/.tmp/dual_cable.wav");
 }

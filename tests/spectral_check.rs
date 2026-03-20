@@ -49,6 +49,7 @@ fn avg_band_energy(samples: &[f32], rate: u32, lo: f32, hi: f32) -> f32 {
     if count > 0 { (total / count as f64) as f32 } else { 0.0 }
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn spectral_comparison() {
     let (mic, mr) = load_wav("tests/.tmp/dual_mic.wav");

@@ -29,8 +29,10 @@ fn load_wav(path: &str) -> (Vec<f32>, u32) {
     (samples, spec.sample_rate)
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn voice_through_cable() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     let (voice, voice_rate) = load_wav("tests/test_voice.wav");
     eprintln!("Loaded voice: {} samples, {}Hz, {:.2}s",
         voice.len(), voice_rate, voice.len() as f64 / voice_rate as f64);
@@ -127,7 +129,7 @@ fn voice_through_cable() {
     w2.finalize().unwrap();
 
     eprintln!("\nWrote:");
-    eprintln!("  tests/voice_original.wav");
-    eprintln!("  tests/voice_through_cable.wav");
+    eprintln!("  tests/.tmp/voice_original.wav");
+    eprintln!("  tests/.tmp/voice_through_cable.wav");
     eprintln!("Listen to both and compare!");
 }

@@ -14,6 +14,7 @@ fn rms(samples: &[f32]) -> f32 {
     (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn compare_boosted_vs_direct() {
     let (boosted, br) = load_wav("tests/.tmp/rec_boosted.wav");

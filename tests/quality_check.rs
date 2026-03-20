@@ -41,6 +41,7 @@ fn band_energy(samples: &[f32], sample_rate: u32, lo_hz: f32, hi_hz: f32) -> f32
     energy as f32
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn quality_comparison() {
     let (mic, mic_rate) = load_wav("tests/.tmp/dual_mic.wav");

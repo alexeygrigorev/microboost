@@ -49,6 +49,7 @@ fn peak_frequency(samples: &[f32], sample_rate: u32) -> (f32, f32) {
     (max_freq, max_mag)
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn analyze_noise_difference() {
     let (mic, mic_rate) = load_wav("tests/.tmp/rec_mic_direct.wav");

@@ -34,8 +34,10 @@ fn load_wav(path: &str) -> (Vec<f32>, u32) {
     (samples, spec.sample_rate)
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn voice_through_pipeline_and_cable() {
+    std::fs::create_dir_all("tests/.tmp").ok();
     let (voice, voice_rate) = load_wav("tests/test_voice.wav");
     eprintln!(
         "Loaded voice: {} samples, {}Hz, {:.2}s",
@@ -196,6 +198,6 @@ fn voice_through_pipeline_and_cable() {
     }
     w.finalize().unwrap();
 
-    eprintln!("\nWrote tests/voice_through_pipeline.wav");
-    eprintln!("Compare with tests/voice_original.wav");
+    eprintln!("\nWrote tests/.tmp/voice_through_pipeline.wav");
+    eprintln!("Compare with tests/.tmp/voice_original.wav");
 }

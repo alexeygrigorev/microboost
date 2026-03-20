@@ -38,6 +38,7 @@ fn find_alignment(a: &[f32], b: &[f32], max_offset: usize) -> (usize, f32) {
     (best_offset, best_corr)
 }
 
+#[ignore] // requires manual recording
 #[test]
 fn deep_sample_comparison() {
     let (orig, or) = load_wav("tests/.tmp/e2e_original.wav");
