@@ -10,9 +10,12 @@ cpal = "0.16"
 hound = "3.5"
 chrono = "0.4"
 rodio = { version = "0.20", default-features = false, features = ["wav"] }
-windows = { version = "0.58", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com"] }
+windows = { version = "0.58", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_UI_WindowsAndMessaging"] }
+raw-window-handle = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tray-icon = { version = "0.21", default-features = false }
+winreg = "0.55"
 
 [build-dependencies]
 chrono = "0.4"

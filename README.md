@@ -36,6 +36,8 @@ On first launch, the app will offer to download and install VB-CABLE (free) auto
 - Test recording and playback to verify your levels
 - Lock-free audio pipeline (96.7 dB SNR)
 - Native UI built with egui
+- Optional launch at Windows sign-in, with a start-minimized option
+- Close-to-tray behavior so microphone boosting can keep running in the background
 
 ## Installation
 
@@ -62,6 +64,8 @@ The executable will be at `target/x86_64-pc-windows-msvc/release/microboost.exe`
 5. In your other app (Discord, Teams, etc.), select "CABLE Output" as the microphone input.
 
 Use "Record Test" and "Play" to verify the boost sounds right before going live.
+
+Enable **Start with Windows** to launch Microboost when you sign in. Enable **Start minimized** to have that automatic launch go directly to the system tray. Closing the main window also hides it in the tray; left-click the tray icon to reopen it, or right-click it and choose **Exit** to fully quit.
 
 Recordings are saved to `%APPDATA%\Microboost\`.
 
