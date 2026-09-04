@@ -3,10 +3,186 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use eframe::egui;
 use microboost::{noise_gate, SpscRing, RING_SIZE};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+use windows::Win32::UI::WindowsAndMessaging::{
+    PostMessageW, SetForegroundWindow, ShowWindow, SW_HIDE, SW_RESTORE, WM_CLOSE,
+};
+
+const START_MINIMIZED_ARG: &str = "--minimized";
+
+mod startup {
+    use std::io;
+    use std::path::Path;
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+    const VALUE_NAME: &str = "Microboost";
+
+    pub fn is_enabled() -> bool {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        hkcu.open_subkey(RUN_KEY)
+            .and_then(|key| key.get_value::<String, _>(VALUE_NAME))
+            .is_ok()
+    }
+
+    pub fn set_enabled(enabled: bool, start_minimized: bool) -> io::Result<()> {
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        if enabled {
+            let (key, _) = hkcu.create_subkey(RUN_KEY)?;
+            let executable = std::env::current_exe()?;
+            key.set_value(VALUE_NAME, &startup_command(&executable, start_minimized))
+        } else {
+            let key = match hkcu.open_subkey_with_flags(RUN_KEY, winreg::enums::KEY_SET_VALUE) {
+                Ok(key) => key,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error),
+            };
+            match key.delete_value(VALUE_NAME) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    fn startup_command(executable: &Path, start_minimized: bool) -> String {
+        let mut command = format!(r#""{}""#, executable.display());
+        if start_minimized {
+            command.push(' ');
+            command.push_str(super::START_MINIMIZED_ARG);
+        }
+        command
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn startup_command_quotes_path_and_adds_minimized_flag() {
+            let path = Path::new(r"C:\Program Files\Microboost\microboost.exe");
+            assert_eq!(
+                startup_command(path, true),
+                r#""C:\Program Files\Microboost\microboost.exe" --minimized"#
+            );
+            assert_eq!(
+                startup_command(path, false),
+                r#""C:\Program Files\Microboost\microboost.exe""#
+            );
+        }
+    }
+}
+
+struct TrayState {
+    _icon: TrayIcon,
+    window_handle: isize,
+}
+
+impl TrayState {
+    fn new(window_handle: isize, allow_exit: Arc<AtomicBool>) -> Result<Self, String> {
+        let menu = Menu::new();
+        let show_item = MenuItem::new("Open Microboost", true, None);
+        let separator = PredefinedMenuItem::separator();
+        let exit_item = MenuItem::new("Exit", true, None);
+        menu.append_items(&[&show_item, &separator, &exit_item])
+            .map_err(|error| error.to_string())?;
+
+        let show_id = show_item.id().clone();
+        let exit_id = exit_item.id().clone();
+        MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
+            if event.id == show_id {
+                Self::show_window(window_handle);
+            } else if event.id == exit_id {
+                allow_exit.store(true, Ordering::Release);
+                Self::request_exit(window_handle);
+            }
+        }));
+
+        TrayIconEvent::set_event_handler(Some(move |event: TrayIconEvent| {
+            if matches!(
+                event,
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } | TrayIconEvent::DoubleClick {
+                    button: MouseButton::Left,
+                    ..
+                }
+            ) {
+                Self::show_window(window_handle);
+            }
+        }));
+
+        let icon = tray_icon::Icon::from_rgba(Self::icon_rgba(), 32, 32)
+            .map_err(|error| error.to_string())?;
+        let icon = TrayIconBuilder::new()
+            .with_tooltip("Microboost")
+            .with_menu(Box::new(menu))
+            .with_menu_on_left_click(false)
+            .with_icon(icon)
+            .build()
+            .map_err(|error| error.to_string())?;
+
+        Ok(Self {
+            _icon: icon,
+            window_handle,
+        })
+    }
+
+    fn hide_window(&self) {
+        let hwnd = HWND(self.window_handle as *mut std::ffi::c_void);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_HIDE);
+        }
+    }
+
+    fn show_window(window_handle: isize) {
+        let hwnd = HWND(window_handle as *mut std::ffi::c_void);
+        unsafe {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+            let _ = SetForegroundWindow(hwnd);
+        }
+    }
+
+    fn request_exit(window_handle: isize) {
+        let hwnd = HWND(window_handle as *mut std::ffi::c_void);
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_CLOSE, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    fn icon_rgba() -> Vec<u8> {
+        let mut rgba = vec![0_u8; 32 * 32 * 4];
+        for y in 0..32_i32 {
+            for x in 0..32_i32 {
+                let offset = ((y * 32 + x) * 4) as usize;
+                let in_circle = (x - 16).pow(2) + (y - 16).pow(2) <= 14_i32.pow(2);
+                if in_circle {
+                    rgba[offset..offset + 4].copy_from_slice(&[52, 168, 83, 255]);
+                }
+
+                let mic_head = (11..=20).contains(&x)
+                    && (6..=20).contains(&y)
+                    && ((x - 16).pow(2) * 16 + (y - 13).pow(2) * 5 <= 400);
+                let mic_stem = (15..=17).contains(&x) && (19..=26).contains(&y);
+                let mic_base = (11..=21).contains(&x) && (25..=27).contains(&y);
+                if mic_head || mic_stem || mic_base {
+                    rgba[offset..offset + 4].copy_from_slice(&[255, 255, 255, 255]);
+                }
+            }
+        }
+        rgba
+    }
+}
 
 /// Device profiles — saved per microphone name
 mod profiles {
@@ -56,6 +232,8 @@ mod profiles {
     #[derive(Serialize, Deserialize, Default)]
     pub struct Settings {
         pub last_input_device: Option<String>,
+        #[serde(default)]
+        pub start_minimized: bool,
     }
 
     pub fn load_settings() -> Settings {
@@ -219,18 +397,33 @@ mod vbcable {
 }
 
 fn main() -> eframe::Result {
+    let start_minimized = std::env::args().any(|arg| arg == START_MINIMIZED_ARG);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([420.0, 740.0])
             .with_resizable(false)
-            .with_title("Microboost"),
+            .with_title("Microboost")
+            .with_visible(!start_minimized),
         ..Default::default()
     };
 
     eframe::run_native(
         "Microboost",
         options,
-        Box::new(|_cc| Ok(Box::new(MicroboostApp::new()))),
+        Box::new(move |cc| {
+            let window_handle = cc.window_handle().ok().and_then(|handle| {
+                if let RawWindowHandle::Win32(handle) = handle.as_raw() {
+                    Some(handle.hwnd.get())
+                } else {
+                    None
+                }
+            });
+            Ok(Box::new(MicroboostApp::new(
+                &cc.egui_ctx,
+                start_minimized,
+                window_handle,
+            )))
+        }),
     )
 }
 
@@ -317,6 +510,12 @@ struct MicroboostApp {
     // Auto-start
     first_frame: bool,
 
+    // Windows startup and system tray
+    launch_at_startup: bool,
+    start_minimized: bool,
+    tray: Option<TrayState>,
+    allow_exit: Arc<AtomicBool>,
+
     // Noise gate
     noise_gate: Arc<Mutex<noise_gate::NoiseGate>>,
     ng_cal_state: Arc<Mutex<noise_gate::CalibrationState>>,
@@ -331,7 +530,11 @@ struct MicroboostApp {
 
 
 impl MicroboostApp {
-    fn new() -> Self {
+    fn new(
+        ctx: &egui::Context,
+        launched_minimized: bool,
+        window_handle: Option<isize>,
+    ) -> Self {
         let host = cpal::default_host();
         let (input_devices, output_devices) = Self::enumerate_devices(&host);
 
@@ -340,6 +543,21 @@ impl MicroboostApp {
 
         let device_profiles = profiles::load();
         let settings = profiles::load_settings();
+        let launch_at_startup = startup::is_enabled();
+        let start_minimized = settings.start_minimized;
+        let allow_exit = Arc::new(AtomicBool::new(false));
+        let tray_result = window_handle
+            .ok_or_else(|| "Could not access the native window handle".to_string())
+            .and_then(|handle| TrayState::new(handle, allow_exit.clone()));
+        let tray_error = tray_result.as_ref().err().cloned();
+        let tray = tray_result.ok();
+        if tray.is_none() && launched_minimized {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
+        }
+
+        let initial_status = tray_error
+            .map(|error| format!("System tray unavailable: {}", error))
+            .unwrap_or_else(|| "Ready".to_string());
 
         // Select input device: 1) last used, 2) Windows default, 3) first
         let selected_input = settings
@@ -383,7 +601,7 @@ impl MicroboostApp {
             selected_output,
             boost,
             is_active: false,
-            status: Arc::new(Mutex::new("Ready".to_string())),
+            status: Arc::new(Mutex::new(initial_status)),
             setup_state: if cable_installed {
                 SetupState::Ready
             } else {
@@ -421,6 +639,11 @@ impl MicroboostApp {
             device_profiles,
 
             first_frame: true,
+
+            launch_at_startup,
+            start_minimized,
+            tray,
+            allow_exit,
 
             noise_gate: Arc::new(Mutex::new(ng)),
             ng_cal_state: noise_gate::new_calibration_state(),
@@ -790,7 +1013,26 @@ impl MicroboostApp {
             profiles::save(&self.device_profiles);
             profiles::save_settings(&profiles::Settings {
                 last_input_device: Some(name.clone()),
+                start_minimized: self.start_minimized,
             });
+        }
+    }
+
+    fn save_app_settings(&self) {
+        profiles::save_settings(&profiles::Settings {
+            last_input_device: self.input_devices.get(self.selected_input).cloned(),
+            start_minimized: self.start_minimized,
+        });
+    }
+
+    fn handle_close_request(&self, ctx: &egui::Context) {
+        if ctx.input(|input| input.viewport().close_requested())
+            && !self.allow_exit.load(Ordering::Acquire)
+        {
+            if let Some(tray) = &self.tray {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                tray.hide_window();
+            }
         }
     }
 
@@ -1275,6 +1517,8 @@ impl MicroboostApp {
 
 impl eframe::App for MicroboostApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_close_request(ctx);
+
         // Poll setup thread
         self.check_setup_thread();
 
@@ -1325,23 +1569,25 @@ impl eframe::App for MicroboostApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(8.0);
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(8.0);
 
-            match &self.setup_state {
-                SetupState::NotInstalled => {
-                    self.show_setup_screen(ui);
+                match &self.setup_state {
+                    SetupState::NotInstalled => {
+                        self.show_setup_screen(ui);
+                    }
+                    SetupState::Downloading => {
+                        self.show_progress_screen(ui);
+                    }
+                    SetupState::Failed(err) => {
+                        let err = err.clone();
+                        self.show_failed_screen(ui, &err);
+                    }
+                    SetupState::Ready => {
+                        self.show_main_screen(ui);
+                    }
                 }
-                SetupState::Downloading => {
-                    self.show_progress_screen(ui);
-                }
-                SetupState::Failed(err) => {
-                    let err = err.clone();
-                    self.show_failed_screen(ui, &err);
-                }
-                SetupState::Ready => {
-                    self.show_main_screen(ui);
-                }
-            }
+            });
         });
     }
 }
@@ -1412,6 +1658,42 @@ impl MicroboostApp {
     fn show_main_screen(&mut self, ui: &mut egui::Ui) {
         ui.heading("Microphone Boost");
         ui.add_space(4.0);
+
+        let mut launch_at_startup = self.launch_at_startup;
+        let mut start_minimized = self.start_minimized;
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut launch_at_startup, "Start with Windows");
+            ui.checkbox(&mut start_minimized, "Start minimized");
+        });
+        ui.label(
+            egui::RichText::new("Closing the window keeps Microboost running in the system tray.")
+                .small()
+                .color(egui::Color32::GRAY),
+        );
+
+        let launch_changed = launch_at_startup != self.launch_at_startup;
+        let minimized_changed = start_minimized != self.start_minimized;
+        if launch_changed || minimized_changed {
+            let registry_result = if launch_changed || launch_at_startup {
+                startup::set_enabled(launch_at_startup, start_minimized)
+            } else {
+                Ok(())
+            };
+            match registry_result {
+                Ok(()) => {
+                    self.launch_at_startup = launch_at_startup;
+                    self.start_minimized = start_minimized;
+                    self.save_app_settings();
+                    *self.status.lock().unwrap() = "Startup settings saved".to_string();
+                }
+                Err(error) => {
+                    *self.status.lock().unwrap() =
+                        format!("Could not update startup settings: {}", error);
+                }
+            }
+        }
+
+        ui.add_space(6.0);
 
         // Input device
         ui.horizontal(|ui| {
